@@ -376,10 +376,14 @@
         return `fee-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       };
 
-      const formatKRW = (value) =>
-        new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW", maximumFractionDigits: 0 }).format(
-          Number(value || 0)
+      const formatKRW = (value) => {
+        if (value === "" || value === null || typeof value === "undefined") return "-";
+        const amount = Number(value);
+        if (Number.isNaN(amount)) return "-";
+        return new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW", maximumFractionDigits: 0 }).format(
+          amount
         );
+      };
 
       const formatDate = (value) => {
         if (!value) return "-";
@@ -478,6 +482,8 @@
         paymentMethod: "계좌이체",
         status: "예정",
         autoRenew: false,
+        autoRenewYear: "",
+        autoRenewStartMonth: "",
         memo: "",
       };
 
@@ -519,6 +525,9 @@
         const [userAccounts, setUserAccounts] = useState([]);
         const [auditLogs, setAuditLogs] = useState([]);
         const currentYear = new Date().getFullYear();
+        const currentMonth = new Date().getMonth() + 1;
+        const autoRenewYearOptions = Array.from({ length: 7 }, (_, i) => String(currentYear - 1 + i));
+        const autoRenewMonthOptions = Array.from({ length: 12 }, (_, i) => String(i + 1));
         const [dashboardYear, setDashboardYear] = useState(String(currentYear));
         const [selectedTopOrganization, setSelectedTopOrganization] = useState("");
         const [isTopDetailModalOpen, setIsTopDetailModalOpen] = useState(false);
@@ -939,6 +948,18 @@
 
         const cycleMultiplier = (cycle) =>
           cycle === "월간" ? 12 : cycle === "분기" ? 4 : cycle === "반기" ? 2 : 1;
+        const getRecurringStep = (cycle) =>
+          cycle === "월간" ? 1 : cycle === "분기" ? 3 : cycle === "반기" ? 6 : 12;
+        const buildRecurringMonths = (cycle, startMonth) => {
+          const month = Number(startMonth);
+          if (!Number.isInteger(month) || month < 1 || month > 12) return [];
+          const step = getRecurringStep(cycle);
+          const months = [];
+          for (let m = month; m <= 12; m += step) {
+            months.push(m);
+          }
+          return months;
+        };
         const getItemYear = (item) => {
           const paymentDate = getPaymentDate(item);
           if (!paymentDate) return null;
@@ -1039,6 +1060,8 @@
               String(item.organization || "").trim().toLowerCase(),
               String(item.entity || "").trim().toLowerCase(),
               String(item.cycle || "").trim().toLowerCase(),
+              String(item.recurringYear || "").trim(),
+              String(item.recurringMonth || "").trim(),
               String(item.paymentDate || "").trim(),
               String(item.recurringOrder || "").trim(),
             ].join("|");
@@ -1085,6 +1108,25 @@
             alert("기관명, 담당부서, 회비 금액은 필수입니다.");
             return;
           }
+          const shouldAutoRegister = !editingId && Boolean(form.autoRenew);
+          const autoRenewYear = Number(form.autoRenewYear);
+          const autoRenewStartMonth = Number(form.autoRenewStartMonth);
+          if (shouldAutoRegister && (!Number.isInteger(autoRenewYear) || autoRenewYear < 2000 || autoRenewYear > 2100)) {
+            alert("정기납부 자동등록은 생성 연도를 선택해야 합니다.");
+            return;
+          }
+          if (
+            shouldAutoRegister &&
+            (!Number.isInteger(autoRenewStartMonth) || autoRenewStartMonth < 1 || autoRenewStartMonth > 12)
+          ) {
+            alert("정기납부 자동등록은 시작월을 선택해야 합니다.");
+            return;
+          }
+          const recurringMonths = shouldAutoRegister ? buildRecurringMonths(form.cycle, autoRenewStartMonth) : [];
+          if (shouldAutoRegister && recurringMonths.length === 0) {
+            alert("자동등록 생성 월 계산에 실패했습니다. 시작월을 다시 선택해주세요.");
+            return;
+          }
 
           const payload = {
             ...form,
@@ -1092,16 +1134,19 @@
             owner: form.owner.trim(),
             memo: form.memo.trim(),
             amount: Number(String(form.amount).replace(/,/g, "")) || 0,
+            recurringYear: form.autoRenewYear ? String(form.autoRenewYear) : String(form.recurringYear || ""),
             paymentDate: form.paymentDate || "",
             nextDueDate: form.paymentDate || "",
             lastPaidDate: form.status === "납부완료" ? form.paymentDate || "" : "",
           };
-          const shouldAutoRegister = !editingId && Boolean(form.autoRenew);
-          const recurringCount = shouldAutoRegister ? cycleMultiplier(payload.cycle) : 1;
+          const recurringCount = shouldAutoRegister ? recurringMonths.length : 1;
           const submitPayloads = shouldAutoRegister
-            ? Array.from({ length: recurringCount }, (_, index) => ({
+            ? recurringMonths.map((month, index) => ({
                 ...payload,
                 status: "예정",
+                amount: "",
+                recurringYear: String(autoRenewYear),
+                recurringMonth: String(month),
                 paymentDate: "",
                 nextDueDate: "",
                 lastPaidDate: "",
@@ -1109,7 +1154,15 @@
                 recurringOrder: index + 1,
                 recurringTotal: recurringCount,
               }))
-            : [{ ...payload, recurringOrder: payload.recurringOrder || "", recurringTotal: payload.recurringTotal || "" }];
+            : [
+                {
+                  ...payload,
+                  recurringYear: String(payload.recurringYear || ""),
+                  recurringMonth: String(payload.recurringMonth || ""),
+                  recurringOrder: payload.recurringOrder || "",
+                  recurringTotal: payload.recurringTotal || "",
+                },
+              ];
           const duplicateExists = submitPayloads.some((row) =>
             items.some(
               (item) =>
@@ -1117,13 +1170,15 @@
                 String(item.organization || "").trim().toLowerCase() === row.organization.toLowerCase() &&
                 String(item.entity || "").trim() === String(row.entity || "").trim() &&
                 String(item.cycle || "").trim() === String(row.cycle || "").trim() &&
+                String(item.recurringYear || "").trim() === String(row.recurringYear || "").trim() &&
+                String(item.recurringMonth || "").trim() === String(row.recurringMonth || "").trim() &&
                 String(item.paymentDate || "").trim() === String(row.paymentDate || "").trim() &&
                 String(item.recurringOrder || "").trim() === String(row.recurringOrder || "").trim()
             )
           );
           if (duplicateExists) {
             const proceed = confirm(
-              "동일 기관/법인(사업장)/주기/납부일/차수 항목이 이미 있습니다. 중복 등록 가능성이 높습니다. 계속 저장할까요?"
+              "동일 기관/법인(사업장)/주기/연도/월/납부일/차수 항목이 이미 있습니다. 중복 등록 가능성이 높습니다. 계속 저장할까요?"
             );
             if (!proceed) return;
           }
@@ -1220,7 +1275,14 @@
 
         const handleEdit = (item) => {
           setEditingId(item.id);
-          setForm({ ...emptyForm, ...item, amount: String(item.amount), autoRenew: Boolean(item.autoRenew) });
+          setForm({
+            ...emptyForm,
+            ...item,
+            amount: String(item.amount),
+            autoRenew: Boolean(item.autoRenew),
+            autoRenewYear: String(item.recurringYear || item.autoRenewYear || ""),
+            autoRenewStartMonth: String(item.recurringMonth || item.autoRenewStartMonth || ""),
+          });
           window.scrollTo({ top: 0, behavior: "smooth" });
         };
 
@@ -1932,15 +1994,58 @@
                             type="checkbox"
                             className="mt-0.5"
                             checked={Boolean(form.autoRenew)}
-                            onChange={(e) => handleChange("autoRenew", e.target.checked)}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                autoRenew: e.target.checked,
+                                autoRenewYear: e.target.checked
+                                  ? prev.autoRenewYear || String(currentYear)
+                                  : prev.autoRenewYear,
+                                autoRenewStartMonth: e.target.checked
+                                  ? prev.autoRenewStartMonth || String(currentMonth)
+                                  : prev.autoRenewStartMonth,
+                              }))
+                            }
                           />
                           <span>
                             정기납부 자동 등록
                             <span className="block text-xs text-slate-500">
-                              체크 시 주기별 자동 생성 (예정/납부일 공란)
+                              체크 시 선택 연도 주기별 자동 생성 (예정/납부일/금액 공란)
                             </span>
                           </span>
                         </label>
+                        {Boolean(form.autoRenew) && (
+                          <div className="grid grid-cols-2 gap-2">
+                            <Field label="자동등록 연도 *">
+                              <select
+                                className="input-style"
+                                value={form.autoRenewYear || ""}
+                                onChange={(e) => handleChange("autoRenewYear", e.target.value)}
+                              >
+                                <option value="">연도 선택</option>
+                                {autoRenewYearOptions.map((year) => (
+                                  <option key={year} value={year}>
+                                    {year}년
+                                  </option>
+                                ))}
+                              </select>
+                            </Field>
+                            <Field label="자동등록 시작월 *">
+                              <select
+                                className="input-style"
+                                value={form.autoRenewStartMonth || ""}
+                                onChange={(e) => handleChange("autoRenewStartMonth", e.target.value)}
+                              >
+                                <option value="">시작월 선택</option>
+                                {autoRenewMonthOptions.map((month) => (
+                                  <option key={month} value={month}>
+                                    {month}월
+                                  </option>
+                                ))}
+                              </select>
+                            </Field>
+                          </div>
+                        )}
                         <div className="flex gap-2 pt-1">
                           <button
                             type="submit"
