@@ -399,6 +399,11 @@
         return Math.ceil((target - today) / 86400000);
       };
 
+      const normalizeItem = (item) => {
+        const { autoRenew, budgetCode, ...rest } = item || {};
+        return rest;
+      };
+
       const defaultItems = [
         {
           id: createItemId(),
@@ -412,9 +417,7 @@
           nextDueDate: "2026-03-20",
           lastPaidDate: "",
           paymentMethod: "법인카드",
-          budgetCode: "ADM-01",
           status: "예정",
-          autoRenew: true,
           memo: "정기 회원사 자격 유지",
         },
         {
@@ -429,9 +432,7 @@
           nextDueDate: "2026-02-15",
           lastPaidDate: "",
           paymentMethod: "세금계산서",
-          budgetCode: "BIZ-13",
           status: "연체",
-          autoRenew: false,
           memo: "미납 시 교육할인 중단 위험",
         },
         {
@@ -446,9 +447,7 @@
           nextDueDate: "2026-06-10",
           lastPaidDate: "",
           paymentMethod: "계좌이체",
-          budgetCode: "HR-07",
           status: "납부완료",
-          autoRenew: true,
           memo: "학술자료 구독 포함",
         },
       ];
@@ -458,7 +457,7 @@
           const raw = localStorage.getItem(CACHE_KEY);
           if (!raw) return defaultItems;
           const parsed = JSON.parse(raw);
-          return Array.isArray(parsed) ? parsed : defaultItems;
+          return Array.isArray(parsed) ? parsed.map(normalizeItem) : defaultItems;
         } catch {
           return defaultItems;
         }
@@ -477,9 +476,7 @@
         amount: "",
         paymentDate: "",
         paymentMethod: "계좌이체",
-        budgetCode: "",
         status: "예정",
-        autoRenew: true,
         memo: "",
       };
 
@@ -713,7 +710,7 @@
               stopSnapshot = onSnapshot(
                 q,
                 (snapshot) => {
-                  const docs = snapshot.docs.map((d) => ({ ...d.data(), id: d.id }));
+                  const docs = snapshot.docs.map((d) => normalizeItem({ ...d.data(), id: d.id }));
                   setItems(docs);
                   setIsCloudConnected(true);
                   setIsSyncing(false);
@@ -990,7 +987,7 @@
 
         const filteredItems = useMemo(() => {
           return items.filter((item) => {
-            const text = `${item.organization} ${item.owner} ${item.category} ${item.budgetCode}`.toLowerCase();
+            const text = `${item.organization} ${item.owner} ${item.category}`.toLowerCase();
             const q = search.trim().toLowerCase();
             if (q && !text.includes(q)) return false;
             if (statusFilter !== "전체" && item.status !== statusFilter) return false;
@@ -1041,6 +1038,7 @@
               String(item.organization || "").trim().toLowerCase(),
               String(item.entity || "").trim().toLowerCase(),
               String(item.cycle || "").trim().toLowerCase(),
+              String(item.paymentDate || "").trim(),
             ].join("|");
             if (!duplicateMap.has(key)) duplicateMap.set(key, []);
             duplicateMap.get(key).push(item);
@@ -1090,7 +1088,6 @@
             ...form,
             organization: form.organization.trim(),
             owner: form.owner.trim(),
-            budgetCode: form.budgetCode.trim(),
             memo: form.memo.trim(),
             amount: Number(String(form.amount).replace(/,/g, "")) || 0,
             paymentDate: form.paymentDate || "",
@@ -1102,11 +1099,12 @@
               item.id !== editingId &&
               String(item.organization || "").trim().toLowerCase() === payload.organization.toLowerCase() &&
               String(item.entity || "").trim() === String(payload.entity || "").trim() &&
-              String(item.cycle || "").trim() === String(payload.cycle || "").trim()
+              String(item.cycle || "").trim() === String(payload.cycle || "").trim() &&
+              String(item.paymentDate || "").trim() === String(payload.paymentDate || "").trim()
           );
           if (duplicateExists) {
             const proceed = confirm(
-              "동일 기관/법인(사업장)/주기 항목이 이미 있습니다. 중복 등록 가능성이 높습니다. 계속 저장할까요?"
+              "동일 기관/법인(사업장)/주기/납부일 항목이 이미 있습니다. 중복 등록 가능성이 높습니다. 계속 저장할까요?"
             );
             if (!proceed) return;
           }
@@ -1272,9 +1270,7 @@
             금액: Number(i.amount || 0),
             납부일: getPaymentDate(i),
             지급수단: i.paymentMethod,
-            예산코드: i.budgetCode,
             상태: i.status,
-            자동갱신: i.autoRenew ? "Y" : "N",
             메모: i.memo,
           }));
 
@@ -1434,7 +1430,6 @@
           .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
         const paidCount = dashboardItems.filter((item) => item.status === "납부완료").length;
         const completionRate = dashboardItems.length ? Math.round((paidCount / dashboardItems.length) * 100) : 0;
-        const autoRenewCount = dashboardItems.filter((item) => item.autoRenew).length;
         const entitySummary = [...entityOptions]
           .map((entity) => ({
             entity,
@@ -1613,14 +1608,29 @@
                         <i className="fa-solid fa-right-from-bracket mr-2"></i>
                         로그아웃
                       </button>
+                      {activeMenu === "dashboard" && (
+                        <div className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                          <p className="text-sm font-semibold text-slate-700 whitespace-nowrap">기준 연도</p>
+                          <select
+                            className="input-style w-auto min-w-[92px] py-1.5"
+                            value={dashboardYear}
+                            onChange={(e) => setDashboardYear(e.target.value)}
+                          >
+                            {dashboardYearOptions.map((year) => (
+                              <option key={year} value={String(year)}>
+                                {year}년
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </section>
 
                 {activeMenu === "dashboard" && (
                   <div className="space-y-4 animate-menu-in">
-                    <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-3 md:gap-4">
-                      <KpiCard label="연간 계획 예산" value={formatKRW(stats.annualPlan)} icon="wallet" tone="brand" />
+                    <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 md:gap-4">
                       <KpiCard label="납부 완료 합계" value={formatKRW(stats.paid)} icon="circle-check" tone="emerald" />
                       <KpiCard label="연체 금액" value={formatKRW(stats.overdue)} icon="triangle-exclamation" tone="rose" />
                       <KpiCard
@@ -1631,24 +1641,6 @@
                         pulse={stats.next30 > 0}
                       />
                       <KpiCard label="납부 완료율" value={`${completionRate}%`} icon="percent" tone="emerald" />
-                      <KpiCard label="자동갱신 대상" value={`${autoRenewCount}건`} icon="arrows-rotate" tone="brand" />
-                    </section>
-                    <section className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2.5">
-                      <p className="text-sm font-semibold text-slate-700">대시보드 기준 연도</p>
-                      <div className="flex items-center gap-2">
-                        <select
-                          className="input-style min-w-[120px] py-1.5"
-                          value={dashboardYear}
-                          onChange={(e) => setDashboardYear(e.target.value)}
-                        >
-                          {dashboardYearOptions.map((year) => (
-                            <option key={year} value={String(year)}>
-                              {year}년
-                            </option>
-                          ))}
-                        </select>
-                        <span className="text-xs text-slate-500">선택 연도 기준으로 집계됩니다.</span>
-                      </div>
                     </section>
                     <section className="grid grid-cols-1 xl:grid-cols-[1.1fr_1.1fr_1.4fr] gap-4">
                       <Card title="상태별 관리 현황" subtitle="건수/금액 동시 모니터링">
@@ -1824,14 +1816,6 @@
                               placeholder="예: 총무팀"
                             />
                           </Field>
-                          <Field label="예산코드">
-                            <input
-                              className="input-style"
-                              value={form.budgetCode}
-                              onChange={(e) => handleChange("budgetCode", e.target.value)}
-                              placeholder="예: ADM-01"
-                            />
-                          </Field>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           <Field label="주기">
@@ -1898,14 +1882,6 @@
                             placeholder="회비 납부 시 참고 메모"
                           />
                         </Field>
-                        <label className="flex items-center gap-2 text-sm text-slate-600">
-                          <input
-                            type="checkbox"
-                            checked={form.autoRenew}
-                            onChange={(e) => handleChange("autoRenew", e.target.checked)}
-                          />
-                          자동 갱신 대상
-                        </label>
                         <div className="flex gap-2 pt-1">
                           <button
                             type="submit"
@@ -1928,7 +1904,7 @@
                       <div className="flex flex-col md:flex-row gap-2 mb-3">
                         <input
                           className="input-style"
-                          placeholder="기관명/담당부서/예산코드 검색"
+                          placeholder="기관명/담당부서/구분 검색"
                           value={search}
                           onChange={(e) => setSearch(e.target.value)}
                         />
@@ -2181,7 +2157,8 @@
                             )}
                             {dataQuality.duplicates.map((group, idx) => (
                               <div key={idx} className="text-xs text-slate-700 bg-slate-50 rounded-lg p-2">
-                                {group[0]?.organization} · {group[0]?.entity} · {group[0]?.cycle} ({group.length}건)
+                                {group[0]?.organization} · {group[0]?.entity} · {group[0]?.cycle} ·{" "}
+                                {group[0]?.paymentDate || "-"} ({group.length}건)
                               </div>
                             ))}
                           </div>
