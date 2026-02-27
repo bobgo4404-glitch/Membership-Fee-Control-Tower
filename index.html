@@ -240,33 +240,12 @@
   <body class="font-sans text-slate-800 antialiased">
     <div id="root"></div>
 
-    <script type="module">
-      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-      import { getAnalytics, isSupported } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
-      import {
-        getAuth,
-        onAuthStateChanged,
-        signInWithEmailAndPassword,
-        createUserWithEmailAndPassword,
-        signOut,
-        setPersistence,
-        browserLocalPersistence,
-      } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-      import {
-        getFirestore,
-        collection,
-        addDoc,
-        updateDoc,
-        deleteDoc,
-        setDoc,
-        getDoc,
-        doc,
-        onSnapshot,
-        query,
-        orderBy,
-        limit,
-        serverTimestamp,
-      } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics-compat.js"></script>
+
+    <script>
 
       const firebaseConfig = {
         apiKey: "AIzaSyCRoSo6X7uIXF8Ak_CNWQa3RTovbcukapg",
@@ -279,41 +258,76 @@
       };
 
       try {
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
+        if (!window.firebase) {
+          throw new Error("Firebase SDK 로드 실패");
+        }
+        const app = window.firebase.initializeApp(firebaseConfig);
+        const auth = window.firebase.auth();
+        const db = window.firebase.firestore();
         let analytics = null;
-        isSupported()
-          .then((supported) => {
-            if (supported) analytics = getAnalytics(app);
-          })
-          .catch(() => {});
+        try {
+          analytics = window.firebase.analytics();
+        } catch {}
+
+        const normalizeDocSnapshot = (snap) => {
+          if (!snap || typeof snap !== "object") return snap;
+          if (typeof snap.exists === "function") return snap;
+          return {
+            id: snap.id,
+            ref: snap.ref,
+            metadata: snap.metadata,
+            exists: () => Boolean(snap.exists),
+            data: (...args) => (typeof snap.data === "function" ? snap.data(...args) : undefined),
+            get: (...args) => (typeof snap.get === "function" ? snap.get(...args) : undefined),
+          };
+        };
+        const normalizeQuerySnapshot = (snap) => {
+          if (!snap || typeof snap !== "object") return snap;
+          return {
+            docs: Array.isArray(snap.docs) ? snap.docs.map((docSnap) => normalizeDocSnapshot(docSnap)) : [],
+          };
+        };
+
+        const methods = {
+          onAuthStateChanged: (authRef, next, error) => authRef.onAuthStateChanged(next, error),
+          signInWithEmailAndPassword: (authRef, email, password) =>
+            authRef.signInWithEmailAndPassword(email, password),
+          createUserWithEmailAndPassword: (authRef, email, password) =>
+            authRef.createUserWithEmailAndPassword(email, password),
+          signOut: (authRef) => authRef.signOut(),
+          setPersistence: (authRef, persistence) => authRef.setPersistence(persistence),
+          browserLocalPersistence: window.firebase.auth.Auth.Persistence.LOCAL,
+          collection: (dbRef, name) => dbRef.collection(name),
+          addDoc: (collectionRef, data) => collectionRef.add(data),
+          updateDoc: (docRef, data) => docRef.update(data),
+          deleteDoc: (docRef) => docRef.delete(),
+          setDoc: (docRef, data, options) => docRef.set(data, options),
+          getDoc: async (docRef) => normalizeDocSnapshot(await docRef.get()),
+          doc: (dbRef, collectionName, id) => dbRef.collection(collectionName).doc(id),
+          onSnapshot: (ref, next, error) =>
+            ref.onSnapshot(
+              (snap) => {
+                if (snap && Array.isArray(snap.docs)) {
+                  next(normalizeQuerySnapshot(snap));
+                  return;
+                }
+                next(normalizeDocSnapshot(snap));
+              },
+              error
+            ),
+          orderBy: (field, direction = "asc") => (ref) => ref.orderBy(field, direction),
+          limit: (count) => (ref) => ref.limit(count),
+          query: (ref, ...constraints) =>
+            constraints.reduce((acc, applyConstraint) => applyConstraint(acc), ref),
+          serverTimestamp: () => window.firebase.firestore.FieldValue.serverTimestamp(),
+        };
 
         window.FeeFirebase = {
           app,
           auth,
           db,
           analytics,
-          methods: {
-            onAuthStateChanged,
-            signInWithEmailAndPassword,
-            createUserWithEmailAndPassword,
-            signOut,
-            setPersistence,
-            browserLocalPersistence,
-            collection,
-            addDoc,
-            updateDoc,
-            deleteDoc,
-            setDoc,
-            getDoc,
-            doc,
-            onSnapshot,
-            query,
-            orderBy,
-            limit,
-            serverTimestamp,
-          },
+          methods,
         };
       } catch (error) {
         console.error("Firebase 초기화 실패", error);
@@ -322,6 +336,18 @@
     </script>
 
     <script type="text/babel">
+      if (!window.React || !window.ReactDOM) {
+        const root = document.getElementById("root");
+        if (root) {
+          root.innerHTML = `
+            <div style="max-width:760px;margin:48px auto;padding:24px;border:1px solid #fecaca;background:#fff1f2;border-radius:16px;font-family:Pretendard,sans-serif;color:#881337;">
+              <h1 style="font-size:20px;font-weight:700;margin-bottom:8px;">필수 라이브러리를 불러오지 못했습니다.</h1>
+              <p style="font-size:14px;line-height:1.6;">인터넷 연결 또는 보안 프로그램(CDN 차단)을 확인한 뒤 다시 열어주세요.</p>
+            </div>
+          `;
+        }
+        throw new Error("React CDN 로드 실패");
+      }
       const { useMemo, useState, useEffect } = React;
 
       const CACHE_KEY = "corp_membership_fees_cache_v1";
@@ -329,7 +355,8 @@
       const CONFIG_COLLECTION_NAME = "corp_membership_config";
       const CONFIG_DOC_ID = "global";
       const USERS_COLLECTION_NAME = "corp_membership_users";
-      const ADMIN_EMAIL = "jiwon2@yujintechnology.com";
+      const ADMIN_EMAILS = ["jiwon2@yujintechnology.com", "master@m-crm.local"];
+      const isAdminEmail = (email) => ADMIN_EMAILS.includes(String(email || "").toLowerCase());
       const SAVED_EMAIL_KEY = "corp_membership_saved_email_v1";
       const defaultSettings = {
         companyName: "우리회사",
@@ -342,6 +369,12 @@
         allowCsvExport: true,
       };
       const monthLabels = Array.from({ length: 12 }, (_, i) => `${i + 1}월`);
+      const createItemId = () => {
+        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+          return crypto.randomUUID();
+        }
+        return `fee-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      };
 
       const formatKRW = (value) =>
         new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW", maximumFractionDigits: 0 }).format(
@@ -368,7 +401,7 @@
 
       const defaultItems = [
         {
-          id: crypto.randomUUID(),
+          id: createItemId(),
           organization: "대한상공회의소",
           category: "협회",
           entity: "본사",
@@ -385,7 +418,7 @@
           memo: "정기 회원사 자격 유지",
         },
         {
-          id: crypto.randomUUID(),
+          id: createItemId(),
           organization: "한국무역협회",
           category: "유관기관",
           entity: "서울지사",
@@ -402,7 +435,7 @@
           memo: "미납 시 교육할인 중단 위험",
         },
         {
-          id: crypto.randomUUID(),
+          id: createItemId(),
           organization: "한국인사관리학회",
           category: "학회",
           entity: "본사",
@@ -516,8 +549,7 @@
         }, [settings.entityOptions, form.entity, entityFilter]);
 
         useEffect(() => {
-          const admin =
-            String(authUser?.email || "").toLowerCase() === ADMIN_EMAIL || userProfile?.role === "admin";
+          const admin = isAdminEmail(authUser?.email) || userProfile?.role === "admin";
           if (!admin && (activeMenu === "settings" || activeMenu === "audit")) {
             setActiveMenu("dashboard");
           }
@@ -541,12 +573,20 @@
           let stopUserProfileSnapshot = null;
           let stopUserAccountsSnapshot = null;
           let stopAuditSnapshot = null;
+          let userProfileReadyTimeout = null;
           const stopAuth = onAuthStateChanged(
             auth,
             async (user) => {
               setAuthUser(user || null);
               setAuthReady(true);
               setUserProfileReady(false);
+              if (userProfileReadyTimeout) {
+                clearTimeout(userProfileReadyTimeout);
+                userProfileReadyTimeout = null;
+              }
+              userProfileReadyTimeout = setTimeout(() => {
+                setUserProfileReady(true);
+              }, 5000);
 
               if (typeof stopSnapshot === "function") {
                 stopSnapshot();
@@ -577,11 +617,15 @@
                 setUserAccounts([]);
                 setAuditLogs([]);
                 setUserProfileReady(true);
+                if (userProfileReadyTimeout) {
+                  clearTimeout(userProfileReadyTimeout);
+                  userProfileReadyTimeout = null;
+                }
                 return;
               }
 
               const userEmail = String(user.email || "").toLowerCase();
-              const isAdminEmail = userEmail === ADMIN_EMAIL;
+              const isCurrentAdminEmail = isAdminEmail(userEmail);
               const userDocRef = methods.doc(db, USERS_COLLECTION_NAME, user.uid);
               try {
                 const userSnap = await getDoc(userDocRef);
@@ -591,8 +635,8 @@
                     {
                       uid: user.uid,
                       email: user.email || "",
-                      role: isAdminEmail ? "admin" : "user",
-                      approved: isAdminEmail,
+                      role: isCurrentAdminEmail ? "admin" : "user",
+                      approved: isCurrentAdminEmail,
                       requestedAt: methods.serverTimestamp(),
                       lastLoginAt: methods.serverTimestamp(),
                     },
@@ -605,8 +649,8 @@
                     {
                       email: user.email || data.email || "",
                       lastLoginAt: methods.serverTimestamp(),
-                      role: isAdminEmail ? "admin" : data.role || "user",
-                      approved: isAdminEmail ? true : data.approved === true,
+                      role: isCurrentAdminEmail ? "admin" : data.role || "user",
+                      approved: isCurrentAdminEmail ? true : data.approved === true,
                     },
                     { merge: true }
                   );
@@ -620,14 +664,22 @@
                 (snap) => {
                   setUserProfile(snap.exists() ? { id: snap.id, ...snap.data() } : null);
                   setUserProfileReady(true);
+                  if (userProfileReadyTimeout) {
+                    clearTimeout(userProfileReadyTimeout);
+                    userProfileReadyTimeout = null;
+                  }
                 },
                 () => {
                   setUserProfile(null);
                   setUserProfileReady(true);
+                  if (userProfileReadyTimeout) {
+                    clearTimeout(userProfileReadyTimeout);
+                    userProfileReadyTimeout = null;
+                  }
                 }
               );
 
-              if (isAdminEmail) {
+              if (isCurrentAdminEmail) {
                 const qUsers = query(collection(db, USERS_COLLECTION_NAME), orderBy("requestedAt", "desc"));
                 stopUserAccountsSnapshot = onSnapshot(
                   qUsers,
@@ -709,6 +761,10 @@
               setUserAccounts([]);
               setAuditLogs([]);
               setUserProfileReady(true);
+              if (userProfileReadyTimeout) {
+                clearTimeout(userProfileReadyTimeout);
+                userProfileReadyTimeout = null;
+              }
             }
           );
 
@@ -719,6 +775,7 @@
             if (typeof stopUserAccountsSnapshot === "function") stopUserAccountsSnapshot();
             if (typeof stopAuditSnapshot === "function") stopAuditSnapshot();
             if (typeof stopAuth === "function") stopAuth();
+            if (userProfileReadyTimeout) clearTimeout(userProfileReadyTimeout);
           };
         }, []);
 
@@ -791,9 +848,7 @@
             alert("이메일 로그인 후 사용 가능합니다.");
             return;
           }
-          const isAdmin =
-            String(authUser?.email || "").toLowerCase() === ADMIN_EMAIL ||
-            userProfile?.role === "admin";
+          const isAdmin = isAdminEmail(authUser?.email) || userProfile?.role === "admin";
           if (!isAdmin) {
             alert("환경설정은 Admin 계정만 접근 가능합니다.");
             return;
@@ -841,9 +896,7 @@
         };
 
         const handleUserApproval = async (userId, shouldApprove) => {
-          const isAdmin =
-            String(authUser?.email || "").toLowerCase() === ADMIN_EMAIL ||
-            userProfile?.role === "admin";
+          const isAdmin = isAdminEmail(authUser?.email) || userProfile?.role === "admin";
           if (!isAdmin) {
             alert("Admin 계정만 승인할 수 있습니다.");
             return;
@@ -1112,7 +1165,7 @@
                   prev.map((item) => (item.id === editingId ? { ...item, ...payload } : item))
                 );
               } else {
-                setItems((prev) => [{ ...payload, id: crypto.randomUUID() }, ...prev]);
+                setItems((prev) => [{ ...payload, id: createItemId() }, ...prev]);
               }
             }
             resetForm();
@@ -1334,8 +1387,7 @@
           );
         }
 
-        const isAdmin =
-          String(authUser?.email || "").toLowerCase() === ADMIN_EMAIL || userProfile?.role === "admin";
+        const isAdmin = isAdminEmail(authUser?.email) || userProfile?.role === "admin";
         const isApproved = isAdmin || userProfile?.approved === true;
 
         if (!isApproved) {
@@ -1344,7 +1396,7 @@
               <section className="glass-card rounded-3xl shadow-soft p-6 md:p-7 space-y-4">
                 <h2 className="text-2xl font-black text-slate-900">가입 승인 대기</h2>
                 <p className="text-sm text-slate-600">
-                  관리자 승인 후 시스템 이용이 가능합니다. 승인 담당자: {ADMIN_EMAIL}
+                  관리자 승인 후 시스템 이용이 가능합니다. 승인 담당자: {ADMIN_EMAILS.join(", ")}
                 </p>
                 <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
                   현재 계정: {authUser?.email}
@@ -1402,7 +1454,7 @@
         const dashboardHighAmountItems = [...dashboardItems]
           .filter((item) => Number(item.amount || 0) >= Number(settings.approvalRequiredAmount || 0))
           .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
-        const dashboardTopPaid = useMemo(() => {
+        const dashboardTopPaid = (() => {
           const byOrganization = new Map();
           for (const item of dashboardItems) {
             if (item.status !== "납부완료") continue;
@@ -1426,17 +1478,8 @@
           return [...byOrganization.values()]
             .sort((a, b) => b.annualizedAmount - a.annualizedAmount || b.paidAmount - a.paidAmount)
             .slice(0, 3);
-        }, [dashboardItems]);
-        useEffect(() => {
-          if (!dashboardTopPaid.length) {
-            setSelectedTopOrganization("");
-            return;
-          }
-          if (!dashboardTopPaid.some((row) => row.organization === selectedTopOrganization)) {
-            setSelectedTopOrganization(dashboardTopPaid[0].organization);
-          }
-        }, [dashboardTopPaid, selectedTopOrganization]);
-        const selectedTopDetail = useMemo(() => {
+        })();
+        const selectedTopDetail = (() => {
           if (!dashboardTopPaid.length) return null;
           const selected =
             dashboardTopPaid.find((row) => row.organization === selectedTopOrganization) || dashboardTopPaid[0];
@@ -1456,7 +1499,7 @@
             cycleSummary: [...cycleMap.entries()].sort((a, b) => b[1] - a[1]),
             statusSummary: [...statusMap.entries()].sort((a, b) => b[1] - a[1]),
           };
-        }, [dashboardTopPaid, selectedTopOrganization]);
+        })();
         const openTopDetailModal = (organization) => {
           setSelectedTopOrganization(organization);
           setIsTopDetailModalOpen(true);
@@ -1464,14 +1507,6 @@
         const closeTopDetailModal = () => {
           setIsTopDetailModalOpen(false);
         };
-        useEffect(() => {
-          if (!isTopDetailModalOpen) return;
-          const onKeydown = (e) => {
-            if (e.key === "Escape") closeTopDetailModal();
-          };
-          window.addEventListener("keydown", onKeydown);
-          return () => window.removeEventListener("keydown", onKeydown);
-        }, [isTopDetailModalOpen]);
         const scheduleYear = new Date().getFullYear();
         const dashboardYearNumber = Number(dashboardYear) || scheduleYear;
         const yearlyCalendar = monthLabels.map((label, monthIndex) => {
@@ -2353,7 +2388,7 @@
                             <p className="text-sm text-slate-500">승인 대기 계정이 없습니다.</p>
                           )}
                           {userAccounts
-                            .filter((u) => !u.approved && String(u.email || "").toLowerCase() !== ADMIN_EMAIL)
+                            .filter((u) => !u.approved && !isAdminEmail(u.email))
                             .map((u) => (
                               <div
                                 key={u.id}
@@ -2528,7 +2563,20 @@
         );
       }
 
-      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+      try {
+        ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+      } catch (error) {
+        console.error("초기 렌더링 실패", error);
+        const root = document.getElementById("root");
+        if (root) {
+          root.innerHTML = `
+            <div style="max-width:760px;margin:48px auto;padding:24px;border:1px solid #fecaca;background:#fff1f2;border-radius:16px;font-family:Pretendard,sans-serif;color:#881337;">
+              <h1 style="font-size:20px;font-weight:700;margin-bottom:8px;">화면 로딩에 실패했습니다.</h1>
+              <p style="font-size:14px;line-height:1.6;">브라우저 콘솔(F12) 오류를 확인해 주세요. 네트워크 차단, 외부 CDN 차단, 브라우저 보안정책(file://) 이슈일 수 있습니다.</p>
+            </div>
+          `;
+        }
+      }
     </script>
   </body>
 </html>
