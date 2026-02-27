@@ -526,7 +526,6 @@
         const [auditLogs, setAuditLogs] = useState([]);
         const currentYear = new Date().getFullYear();
         const currentMonth = new Date().getMonth() + 1;
-        const autoRenewYearOptions = Array.from({ length: 7 }, (_, i) => String(currentYear - 1 + i));
         const autoRenewMonthOptions = Array.from({ length: 12 }, (_, i) => String(i + 1));
         const [dashboardYear, setDashboardYear] = useState(String(currentYear));
         const [selectedTopOrganization, setSelectedTopOrganization] = useState("");
@@ -535,8 +534,23 @@
         const [search, setSearch] = useState("");
         const [statusFilter, setStatusFilter] = useState("전체");
         const [entityFilter, setEntityFilter] = useState("전체");
+        const [dateSortOrder, setDateSortOrder] = useState("asc");
         const [currentPage, setCurrentPage] = useState(1);
         const pageSize = 10;
+        const autoRenewBase = useMemo(() => {
+          const paymentDate = String(form.paymentDate || "").trim();
+          if (paymentDate) {
+            const d = new Date(paymentDate);
+            if (!Number.isNaN(d.getTime())) {
+              return { year: d.getFullYear(), month: d.getMonth() + 1 };
+            }
+          }
+          return { year: currentYear, month: currentMonth };
+        }, [form.paymentDate, currentYear, currentMonth]);
+        const autoRenewYearOptions = useMemo(
+          () => Array.from({ length: 7 }, (_, i) => String(autoRenewBase.year - 1 + i)),
+          [autoRenewBase.year]
+        );
 
         useEffect(() => {
           saveCache(items);
@@ -960,6 +974,29 @@
           }
           return months;
         };
+        const getDueMonthKey = (item) => {
+          const recurringYear = Number(item?.recurringYear);
+          const recurringMonth = Number(item?.recurringMonth);
+          if (
+            Number.isInteger(recurringYear) &&
+            recurringYear >= 1900 &&
+            Number.isInteger(recurringMonth) &&
+            recurringMonth >= 1 &&
+            recurringMonth <= 12
+          ) {
+            return recurringYear * 12 + (recurringMonth - 1);
+          }
+          const paymentDate = getPaymentDate(item);
+          if (!paymentDate) return null;
+          const d = new Date(paymentDate);
+          if (Number.isNaN(d.getTime())) return null;
+          return d.getFullYear() * 12 + d.getMonth();
+        };
+        const monthKeyLabel = (monthKey) => {
+          const year = Math.floor(monthKey / 12);
+          const month = (monthKey % 12) + 1;
+          return `${year}년 ${month}월`;
+        };
         const getItemYear = (item) => {
           const paymentDate = getPaymentDate(item);
           if (!paymentDate) return null;
@@ -1008,15 +1045,29 @@
         }, [dashboardItems, settings.alertDaysBefore]);
 
         const filteredItems = useMemo(() => {
-          return items.filter((item) => {
-            const text = `${item.organization} ${item.owner} ${item.category}`.toLowerCase();
-            const q = search.trim().toLowerCase();
-            if (q && !text.includes(q)) return false;
-            if (statusFilter !== "전체" && item.status !== statusFilter) return false;
-            if (entityFilter !== "전체" && item.entity !== entityFilter) return false;
-            return true;
-          });
-        }, [items, search, statusFilter, entityFilter]);
+          return items
+            .filter((item) => {
+              const text = `${item.organization} ${item.owner} ${item.category}`.toLowerCase();
+              const q = search.trim().toLowerCase();
+              if (q && !text.includes(q)) return false;
+              if (statusFilter !== "전체" && item.status !== statusFilter) return false;
+              if (entityFilter !== "전체" && item.entity !== entityFilter) return false;
+              return true;
+            })
+            .sort((a, b) => {
+              const aDateStr = getPaymentDate(a);
+              const bDateStr = getPaymentDate(b);
+              const aTime = aDateStr ? new Date(aDateStr).getTime() : Number.POSITIVE_INFINITY;
+              const bTime = bDateStr ? new Date(bDateStr).getTime() : Number.POSITIVE_INFINITY;
+              const aValid = Number.isFinite(aTime);
+              const bValid = Number.isFinite(bTime);
+              if (aValid && bValid && aTime !== bTime) {
+                return dateSortOrder === "desc" ? bTime - aTime : aTime - bTime;
+              }
+              if (aValid !== bValid) return aValid ? -1 : 1;
+              return String(a.organization || "").localeCompare(String(b.organization || ""), "ko");
+            });
+        }, [items, search, statusFilter, entityFilter, dateSortOrder]);
         const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
         const pagedItems = useMemo(() => {
           const start = (currentPage - 1) * pageSize;
@@ -1044,6 +1095,58 @@
             )
             .sort((a, b) => (a.days ?? 9999) - (b.days ?? 9999));
         }, [items, settings.alertDaysBefore, settings.overdueGraceDays]);
+        const cyclePatternAlerts = useMemo(() => {
+          const groups = new Map();
+          for (const item of items) {
+            const organization = String(item.organization || "").trim() || "미지정 기관";
+            const entity = String(item.entity || "").trim() || "미지정 사업장";
+            const cycle = String(item.cycle || "").trim() || "기타";
+            const step = getRecurringStep(cycle);
+            const groupKey = [organization, entity, cycle].join("|");
+            if (!groups.has(groupKey)) {
+              groups.set(groupKey, {
+                organization,
+                entity,
+                cycle,
+                step,
+                monthKeys: new Set(),
+              });
+            }
+            const monthKey = getDueMonthKey(item);
+            if (monthKey !== null) groups.get(groupKey).monthKeys.add(monthKey);
+          }
+
+          const alerts = [];
+          for (const group of groups.values()) {
+            const monthKeys = [...group.monthKeys].sort((a, b) => a - b);
+            if (monthKeys.length < 2) continue;
+            for (let i = 1; i < monthKeys.length; i += 1) {
+              const prev = monthKeys[i - 1];
+              const curr = monthKeys[i];
+              const gap = curr - prev;
+              if (gap > group.step) {
+                const missingCount = Math.floor((gap - 1) / group.step);
+                alerts.push({
+                  type: "missing",
+                  score: gap - group.step,
+                  message: `${group.organization} · ${group.entity} · ${group.cycle}: ${monthKeyLabel(
+                    prev
+                  )} → ${monthKeyLabel(curr)} 간격이 ${gap}개월(기준 ${group.step}개월)로 ${missingCount}회 누락 가능`,
+                });
+              } else if (gap < group.step) {
+                alerts.push({
+                  type: "duplicate",
+                  score: group.step - gap,
+                  message: `${group.organization} · ${group.entity} · ${group.cycle}: ${monthKeyLabel(
+                    prev
+                  )} → ${monthKeyLabel(curr)} 간격이 ${gap}개월(기준 ${group.step}개월)로 중복 가능`,
+                });
+              }
+            }
+          }
+
+          return alerts.sort((a, b) => b.score - a.score).slice(0, 12);
+        }, [items]);
 
         useEffect(() => {
           setCurrentPage(1);
@@ -1978,7 +2081,24 @@
                             className="input-style"
                             type="date"
                             value={form.paymentDate}
-                            onChange={(e) => handleChange("paymentDate", e.target.value)}
+                            onChange={(e) =>
+                              setForm((prev) => {
+                                const nextPaymentDate = e.target.value;
+                                if (!prev.autoRenew) {
+                                  return { ...prev, paymentDate: nextPaymentDate };
+                                }
+                                const d = new Date(nextPaymentDate);
+                                if (nextPaymentDate && !Number.isNaN(d.getTime())) {
+                                  return {
+                                    ...prev,
+                                    paymentDate: nextPaymentDate,
+                                    autoRenewYear: String(d.getFullYear()),
+                                    autoRenewStartMonth: String(d.getMonth() + 1),
+                                  };
+                                }
+                                return { ...prev, paymentDate: nextPaymentDate };
+                              })
+                            }
                           />
                         </Field>
                         <Field label="메모">
@@ -1999,10 +2119,10 @@
                                 ...prev,
                                 autoRenew: e.target.checked,
                                 autoRenewYear: e.target.checked
-                                  ? prev.autoRenewYear || String(currentYear)
+                                  ? prev.autoRenewYear || String(autoRenewBase.year)
                                   : prev.autoRenewYear,
                                 autoRenewStartMonth: e.target.checked
-                                  ? prev.autoRenewStartMonth || String(currentMonth)
+                                  ? prev.autoRenewStartMonth || String(autoRenewBase.month)
                                   : prev.autoRenewStartMonth,
                               }))
                             }
@@ -2091,6 +2211,14 @@
                           {uniqueEntities.map((e) => (
                             <option key={e}>{e}</option>
                           ))}
+                        </select>
+                        <select
+                          className="input-style md:max-w-[170px]"
+                          value={dateSortOrder}
+                          onChange={(e) => setDateSortOrder(e.target.value)}
+                        >
+                          <option value="asc">납부일 오름차순</option>
+                          <option value="desc">납부일 내림차순</option>
                         </select>
                       </div>
                       <div className="overflow-auto border border-slate-200 rounded-2xl max-h-[520px]">
@@ -2204,6 +2332,27 @@
 
                 {activeMenu === "schedule" && (
                   <section className="space-y-4 animate-menu-in">
+                    <Card title="납부 주기 분석 알림" subtitle="기관/사업장/주기별 간격 이상 자동 감지">
+                      <div className="space-y-2.5 max-h-[260px] overflow-auto pr-1">
+                        {cyclePatternAlerts.length === 0 && (
+                          <p className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+                            주기 간격 이상 항목이 없습니다.
+                          </p>
+                        )}
+                        {cyclePatternAlerts.map((alert, index) => (
+                          <div
+                            key={`${alert.type}-${index}`}
+                            className={`rounded-xl border px-3 py-2 text-sm ${
+                              alert.type === "missing"
+                                ? "border-rose-200 bg-rose-50 text-rose-700"
+                                : "border-amber-200 bg-amber-50 text-amber-700"
+                            }`}
+                          >
+                            {alert.message}
+                          </div>
+                        ))}
+                      </div>
+                    </Card>
                     <Card title={`${scheduleYear} 연간 납부 캘린더`} subtitle="월별 납부 일정과 예상 금액">
                       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5">
                         {yearlyCalendar.map((m) => (
