@@ -477,6 +477,7 @@
         entity: "본사",
         owner: "",
         cycle: "연간",
+        monthlyDueMonth: "",
         amount: "",
         paymentDate: "",
         paymentMethod: "계좌이체",
@@ -998,11 +999,46 @@
           return `${year}년 ${month}월`;
         };
         const getItemYear = (item) => {
+          const recurringYear = Number(item?.recurringYear);
+          if (Number.isInteger(recurringYear) && recurringYear >= 1900) return recurringYear;
           const paymentDate = getPaymentDate(item);
           if (!paymentDate) return null;
           const d = new Date(paymentDate);
           if (Number.isNaN(d.getTime())) return null;
           return d.getFullYear();
+        };
+        const isItemInDashboardYear = (item, year) => {
+          const recurringYear = Number(item?.recurringYear);
+          if (Number.isInteger(recurringYear) && recurringYear >= 1900) {
+            return recurringYear === year;
+          }
+          const recurringMonth = Number(item?.recurringMonth);
+          if (
+            String(item?.cycle || "") === "월간" &&
+            Number.isInteger(recurringMonth) &&
+            recurringMonth >= 1 &&
+            recurringMonth <= 12
+          ) {
+            return true;
+          }
+          const paymentDate = getPaymentDate(item);
+          if (!paymentDate) return false;
+          const d = new Date(paymentDate);
+          if (Number.isNaN(d.getTime())) return false;
+          return d.getFullYear() === year;
+        };
+        const getCalendarMonthIndex = (item, year) => {
+          const recurringMonth = Number(item?.recurringMonth);
+          if (Number.isInteger(recurringMonth) && recurringMonth >= 1 && recurringMonth <= 12) {
+            if (String(item?.cycle || "") === "월간") return recurringMonth - 1;
+            const recurringYear = Number(item?.recurringYear);
+            if (!Number.isInteger(recurringYear) || recurringYear === year) return recurringMonth - 1;
+          }
+          const paymentDate = getPaymentDate(item);
+          if (!paymentDate) return null;
+          const d = new Date(paymentDate);
+          if (Number.isNaN(d.getTime()) || d.getFullYear() !== year) return null;
+          return d.getMonth();
         };
         const dashboardYearOptions = useMemo(() => {
           const years = new Set([currentYear]);
@@ -1019,7 +1055,7 @@
         }, [dashboardYearOptions, dashboardYear, currentYear]);
         const dashboardItems = useMemo(() => {
           const selectedYear = Number(dashboardYear);
-          return items.filter((item) => getItemYear(item) === selectedYear);
+          return items.filter((item) => isItemInDashboardYear(item, selectedYear));
         }, [items, dashboardYear]);
 
         const stats = useMemo(() => {
@@ -1211,6 +1247,10 @@
             alert("기관명, 담당부서, 회비 금액은 필수입니다.");
             return;
           }
+          if (form.cycle === "월간" && !String(form.monthlyDueMonth || "").trim()) {
+            alert("월간 주기는 납부월 선택이 필요합니다.");
+            return;
+          }
           const shouldAutoRegister = !editingId && Boolean(form.autoRenew);
           const autoRenewYear = Number(form.autoRenewYear);
           const autoRenewStartMonth = Number(form.autoRenewStartMonth);
@@ -1237,7 +1277,21 @@
             owner: form.owner.trim(),
             memo: form.memo.trim(),
             amount: Number(String(form.amount).replace(/,/g, "")) || 0,
-            recurringYear: form.autoRenewYear ? String(form.autoRenewYear) : String(form.recurringYear || ""),
+            recurringYear: (() => {
+              if (form.autoRenewYear) return String(form.autoRenewYear);
+              if (form.recurringYear) return String(form.recurringYear);
+              const baseDate = String(form.paymentDate || "").trim();
+              if (baseDate) {
+                const d = new Date(baseDate);
+                if (!Number.isNaN(d.getTime())) return String(d.getFullYear());
+              }
+              if (form.cycle === "월간" && form.monthlyDueMonth) return String(currentYear);
+              return "";
+            })(),
+            recurringMonth:
+              form.cycle === "월간"
+                ? String(form.monthlyDueMonth || "").trim()
+                : String(form.recurringMonth || "").trim(),
             paymentDate: form.paymentDate || "",
             nextDueDate: form.paymentDate || "",
             lastPaidDate: form.status === "납부완료" ? form.paymentDate || "" : "",
@@ -1377,12 +1431,17 @@
         };
 
         const handleEdit = (item) => {
+          const paymentDate = String(item?.paymentDate || "").trim();
+          const paymentDateObj = paymentDate ? new Date(paymentDate) : null;
+          const paymentMonth =
+            paymentDateObj && !Number.isNaN(paymentDateObj.getTime()) ? String(paymentDateObj.getMonth() + 1) : "";
           setEditingId(item.id);
           setForm({
             ...emptyForm,
             ...item,
             amount: String(item.amount),
             autoRenew: Boolean(item.autoRenew),
+            monthlyDueMonth: String(item.recurringMonth || paymentMonth || ""),
             autoRenewYear: String(item.recurringYear || item.autoRenewYear || ""),
             autoRenewStartMonth: String(item.recurringMonth || item.autoRenewStartMonth || ""),
           });
@@ -1716,10 +1775,8 @@
         const dashboardYearNumber = Number(dashboardYear) || scheduleYear;
         const yearlyCalendar = monthLabels.map((label, monthIndex) => {
           const monthItems = dashboardItems.filter((item) => {
-            const paymentDate = getPaymentDate(item);
-            if (!paymentDate) return false;
-            const d = new Date(paymentDate);
-            return !Number.isNaN(d.getTime()) && d.getFullYear() === dashboardYearNumber && d.getMonth() === monthIndex;
+            const idx = getCalendarMonthIndex(item, dashboardYearNumber);
+            return idx === monthIndex;
           });
           return {
             label,
@@ -2032,7 +2089,24 @@
                             <select
                               className="input-style"
                               value={form.cycle}
-                              onChange={(e) => handleChange("cycle", e.target.value)}
+                              onChange={(e) =>
+                                setForm((prev) => {
+                                  const nextCycle = e.target.value;
+                                  if (nextCycle !== "월간") return { ...prev, cycle: nextCycle };
+                                  const baseDate = String(prev.paymentDate || "").trim();
+                                  if (baseDate) {
+                                    const d = new Date(baseDate);
+                                    if (!Number.isNaN(d.getTime())) {
+                                      return { ...prev, cycle: nextCycle, monthlyDueMonth: String(d.getMonth() + 1) };
+                                    }
+                                  }
+                                  return {
+                                    ...prev,
+                                    cycle: nextCycle,
+                                    monthlyDueMonth: prev.monthlyDueMonth || String(currentMonth),
+                                  };
+                                })
+                              }
                             >
                               <option>월간</option>
                               <option>분기</option>
@@ -2084,23 +2158,38 @@
                             onChange={(e) =>
                               setForm((prev) => {
                                 const nextPaymentDate = e.target.value;
-                                if (!prev.autoRenew) {
-                                  return { ...prev, paymentDate: nextPaymentDate };
-                                }
+                                const nextForm = { ...prev, paymentDate: nextPaymentDate };
                                 const d = new Date(nextPaymentDate);
                                 if (nextPaymentDate && !Number.isNaN(d.getTime())) {
-                                  return {
-                                    ...prev,
-                                    paymentDate: nextPaymentDate,
-                                    autoRenewYear: String(d.getFullYear()),
-                                    autoRenewStartMonth: String(d.getMonth() + 1),
-                                  };
+                                  if (prev.cycle === "월간") {
+                                    nextForm.monthlyDueMonth = String(d.getMonth() + 1);
+                                  }
+                                  if (prev.autoRenew) {
+                                    nextForm.autoRenewYear = String(d.getFullYear());
+                                    nextForm.autoRenewStartMonth = String(d.getMonth() + 1);
+                                  }
                                 }
-                                return { ...prev, paymentDate: nextPaymentDate };
+                                return nextForm;
                               })
                             }
                           />
                         </Field>
+                        {form.cycle === "월간" && (
+                          <Field label="월간 납부월 *">
+                            <select
+                              className="input-style"
+                              value={form.monthlyDueMonth || ""}
+                              onChange={(e) => handleChange("monthlyDueMonth", e.target.value)}
+                            >
+                              <option value="">납부월 선택</option>
+                              {autoRenewMonthOptions.map((month) => (
+                                <option key={month} value={month}>
+                                  {month}월
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                        )}
                         <Field label="메모">
                           <textarea
                             className="input-style min-h-[72px]"
