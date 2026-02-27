@@ -487,6 +487,10 @@
         const [userProfileReady, setUserProfileReady] = useState(false);
         const [userAccounts, setUserAccounts] = useState([]);
         const [auditLogs, setAuditLogs] = useState([]);
+        const currentYear = new Date().getFullYear();
+        const [dashboardYear, setDashboardYear] = useState(String(currentYear));
+        const [selectedTopOrganization, setSelectedTopOrganization] = useState("");
+        const [isTopDetailModalOpen, setIsTopDetailModalOpen] = useState(false);
 
         const [search, setSearch] = useState("");
         const [statusFilter, setStatusFilter] = useState("전체");
@@ -882,28 +886,54 @@
           }
         };
 
+        const cycleMultiplier = (cycle) =>
+          cycle === "월간" ? 12 : cycle === "분기" ? 4 : cycle === "반기" ? 2 : 1;
+        const getItemYear = (item) => {
+          const paymentDate = getPaymentDate(item);
+          if (!paymentDate) return null;
+          const d = new Date(paymentDate);
+          if (Number.isNaN(d.getTime())) return null;
+          return d.getFullYear();
+        };
+        const dashboardYearOptions = useMemo(() => {
+          const years = new Set([currentYear]);
+          for (const item of items) {
+            const y = getItemYear(item);
+            if (y) years.add(y);
+          }
+          return [...years].sort((a, b) => b - a);
+        }, [items, currentYear]);
+        useEffect(() => {
+          if (!dashboardYearOptions.includes(Number(dashboardYear))) {
+            setDashboardYear(String(dashboardYearOptions[0] || currentYear));
+          }
+        }, [dashboardYearOptions, dashboardYear, currentYear]);
+        const dashboardItems = useMemo(() => {
+          const selectedYear = Number(dashboardYear);
+          return items.filter((item) => getItemYear(item) === selectedYear);
+        }, [items, dashboardYear]);
+
         const stats = useMemo(() => {
           const alertDays = Number(settings.alertDaysBefore) || 30;
-          const annualPlan = items.reduce((sum, item) => {
-            const multiplier = item.cycle === "월간" ? 12 : item.cycle === "분기" ? 4 : item.cycle === "반기" ? 2 : 1;
-            return sum + Number(item.amount || 0) * multiplier;
+          const annualPlan = dashboardItems.reduce((sum, item) => {
+            return sum + Number(item.amount || 0) * cycleMultiplier(item.cycle);
           }, 0);
 
-          const paid = items
+          const paid = dashboardItems
             .filter((item) => item.status === "납부완료")
             .reduce((sum, item) => sum + Number(item.amount || 0), 0);
 
-          const overdue = items
+          const overdue = dashboardItems
             .filter((item) => item.status === "연체")
             .reduce((sum, item) => sum + Number(item.amount || 0), 0);
 
-          const next30 = items.filter((item) => {
+          const next30 = dashboardItems.filter((item) => {
             const days = getDaysUntil(getPaymentDate(item));
             return days !== null && days >= 0 && days <= alertDays;
           }).length;
 
           return { annualPlan, paid, overdue, next30 };
-        }, [items, settings.alertDaysBefore]);
+        }, [dashboardItems, settings.alertDaysBefore]);
 
         const filteredItems = useMemo(() => {
           return items.filter((item) => {
@@ -923,11 +953,11 @@
 
         const categorySummary = useMemo(() => {
           const map = new Map();
-          for (const item of items) {
+          for (const item of dashboardItems) {
             map.set(item.category, (map.get(item.category) || 0) + Number(item.amount || 0));
           }
           return [...map.entries()].sort((a, b) => b[1] - a[1]);
-        }, [items]);
+        }, [dashboardItems]);
 
         const riskItems = useMemo(() => {
           const alertDays = Number(settings.alertDaysBefore) || 30;
@@ -1350,32 +1380,106 @@
         const highAmountItems = [...items]
           .filter((item) => Number(item.amount || 0) >= Number(settings.approvalRequiredAmount || 0))
           .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
-        const paidCount = items.filter((item) => item.status === "납부완료").length;
-        const completionRate = items.length ? Math.round((paidCount / items.length) * 100) : 0;
-        const autoRenewCount = items.filter((item) => item.autoRenew).length;
+        const paidCount = dashboardItems.filter((item) => item.status === "납부완료").length;
+        const completionRate = dashboardItems.length ? Math.round((paidCount / dashboardItems.length) * 100) : 0;
+        const autoRenewCount = dashboardItems.filter((item) => item.autoRenew).length;
         const entitySummary = [...entityOptions]
           .map((entity) => ({
             entity,
-            amount: items
+            amount: dashboardItems
               .filter((item) => item.entity === entity)
               .reduce((sum, item) => sum + Number(item.amount || 0), 0),
-            count: items.filter((item) => item.entity === entity).length,
+            count: dashboardItems.filter((item) => item.entity === entity).length,
           }))
           .sort((a, b) => b.amount - a.amount);
         const statusSummary = ["예정", "납부완료", "연체", "검토중"].map((status) => ({
           status,
-          count: items.filter((item) => item.status === status).length,
-          amount: items
+          count: dashboardItems.filter((item) => item.status === status).length,
+          amount: dashboardItems
             .filter((item) => item.status === status)
             .reduce((sum, item) => sum + Number(item.amount || 0), 0),
         }));
+        const dashboardHighAmountItems = [...dashboardItems]
+          .filter((item) => Number(item.amount || 0) >= Number(settings.approvalRequiredAmount || 0))
+          .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
+        const dashboardTopPaid = useMemo(() => {
+          const byOrganization = new Map();
+          for (const item of dashboardItems) {
+            if (item.status !== "납부완료") continue;
+            const organization = String(item.organization || "").trim() || "미지정 기관";
+            if (!byOrganization.has(organization)) {
+              byOrganization.set(organization, {
+                organization,
+                paidAmount: 0,
+                annualizedAmount: 0,
+                paidCount: 0,
+                items: [],
+              });
+            }
+            const group = byOrganization.get(organization);
+            const amount = Number(item.amount || 0);
+            group.paidAmount += amount;
+            group.annualizedAmount += amount * cycleMultiplier(item.cycle);
+            group.paidCount += 1;
+            group.items.push(item);
+          }
+          return [...byOrganization.values()]
+            .sort((a, b) => b.annualizedAmount - a.annualizedAmount || b.paidAmount - a.paidAmount)
+            .slice(0, 3);
+        }, [dashboardItems]);
+        useEffect(() => {
+          if (!dashboardTopPaid.length) {
+            setSelectedTopOrganization("");
+            return;
+          }
+          if (!dashboardTopPaid.some((row) => row.organization === selectedTopOrganization)) {
+            setSelectedTopOrganization(dashboardTopPaid[0].organization);
+          }
+        }, [dashboardTopPaid, selectedTopOrganization]);
+        const selectedTopDetail = useMemo(() => {
+          if (!dashboardTopPaid.length) return null;
+          const selected =
+            dashboardTopPaid.find((row) => row.organization === selectedTopOrganization) || dashboardTopPaid[0];
+          if (!selected) return null;
+          const entityMap = new Map();
+          const cycleMap = new Map();
+          const statusMap = new Map();
+          for (const item of selected.items) {
+            const amount = Number(item.amount || 0);
+            entityMap.set(item.entity || "-", (entityMap.get(item.entity || "-") || 0) + amount);
+            cycleMap.set(item.cycle || "-", (cycleMap.get(item.cycle || "-") || 0) + amount);
+            statusMap.set(item.status || "-", (statusMap.get(item.status || "-") || 0) + 1);
+          }
+          return {
+            ...selected,
+            entitySummary: [...entityMap.entries()].sort((a, b) => b[1] - a[1]),
+            cycleSummary: [...cycleMap.entries()].sort((a, b) => b[1] - a[1]),
+            statusSummary: [...statusMap.entries()].sort((a, b) => b[1] - a[1]),
+          };
+        }, [dashboardTopPaid, selectedTopOrganization]);
+        const openTopDetailModal = (organization) => {
+          setSelectedTopOrganization(organization);
+          setIsTopDetailModalOpen(true);
+        };
+        const closeTopDetailModal = () => {
+          setIsTopDetailModalOpen(false);
+        };
+        useEffect(() => {
+          if (!isTopDetailModalOpen) return;
+          const onKeydown = (e) => {
+            if (e.key === "Escape") closeTopDetailModal();
+          };
+          window.addEventListener("keydown", onKeydown);
+          return () => window.removeEventListener("keydown", onKeydown);
+        }, [isTopDetailModalOpen]);
         const scheduleYear = new Date().getFullYear();
+        const dashboardYearNumber = Number(dashboardYear) || scheduleYear;
         const yearlyCalendar = monthLabels.map((label, monthIndex) => {
-          const monthItems = items.filter((item) => {
+          const monthItems = dashboardItems.filter((item) => {
             const paymentDate = getPaymentDate(item);
             if (!paymentDate) return false;
             const d = new Date(paymentDate);
-            return !Number.isNaN(d.getTime()) && d.getFullYear() === scheduleYear && d.getMonth() === monthIndex;
+            return !Number.isNaN(d.getTime()) && d.getFullYear() === dashboardYearNumber && d.getMonth() === monthIndex;
           });
           return {
             label,
@@ -1494,6 +1598,23 @@
                       <KpiCard label="납부 완료율" value={`${completionRate}%`} icon="percent" tone="emerald" />
                       <KpiCard label="자동갱신 대상" value={`${autoRenewCount}건`} icon="arrows-rotate" tone="brand" />
                     </section>
+                    <section className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2.5">
+                      <p className="text-sm font-semibold text-slate-700">대시보드 기준 연도</p>
+                      <div className="flex items-center gap-2">
+                        <select
+                          className="input-style min-w-[120px] py-1.5"
+                          value={dashboardYear}
+                          onChange={(e) => setDashboardYear(e.target.value)}
+                        >
+                          {dashboardYearOptions.map((year) => (
+                            <option key={year} value={String(year)}>
+                              {year}년
+                            </option>
+                          ))}
+                        </select>
+                        <span className="text-xs text-slate-500">선택 연도 기준으로 집계됩니다.</span>
+                      </div>
+                    </section>
                     <section className="grid grid-cols-1 xl:grid-cols-[1.1fr_1.1fr_1.4fr] gap-4">
                       <Card title="상태별 관리 현황" subtitle="건수/금액 동시 모니터링">
                         <div className="space-y-2">
@@ -1528,7 +1649,7 @@
                           ))}
                         </div>
                       </Card>
-                      <Card title={`${scheduleYear} 납부 로드맵`} subtitle="월별 예정 납부 총액">
+                      <Card title={`${dashboardYearNumber} 납부 로드맵`} subtitle="월별 예정 납부 총액">
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
                           {yearlyCalendar.map((m) => (
                             <div
@@ -1555,7 +1676,7 @@
                         </div>
                       </Card>
                     </section>
-                    <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                       <Card title="기관 유형별 금액" subtitle="지출 구조 확인">
                         <div className="space-y-3">
                           {categorySummary.map(([name, amount]) => (
@@ -1576,8 +1697,8 @@
                       </Card>
                       <Card title="결재 필요 고액 회비" subtitle={`${formatKRW(settings.approvalRequiredAmount || 0)} 이상`}>
                         <div className="space-y-2 max-h-[300px] overflow-auto">
-                          {highAmountItems.length === 0 && <p className="text-sm text-slate-500">해당 항목이 없습니다.</p>}
-                          {highAmountItems.map((item) => (
+                          {dashboardHighAmountItems.length === 0 && <p className="text-sm text-slate-500">해당 항목이 없습니다.</p>}
+                          {dashboardHighAmountItems.map((item) => (
                             <div key={item.id} className="p-3 rounded-xl border border-slate-200 bg-white">
                               <p className="text-sm font-semibold text-slate-900">{item.organization}</p>
                               <p className="text-xs text-slate-500 mt-1">
@@ -1585,6 +1706,36 @@
                               </p>
                             </div>
                           ))}
+                        </div>
+                      </Card>
+                      <Card title={`${dashboardYearNumber} 연간 납부 Top3`} subtitle="항목 클릭 시 집계 내역을 확인합니다.">
+                        <div className="space-y-2">
+                          {dashboardTopPaid.length === 0 && (
+                            <p className="text-sm text-slate-500">선택 연도에 납부완료 데이터가 없습니다.</p>
+                          )}
+                          {dashboardTopPaid.map((row, idx) => {
+                            const selected = row.organization === selectedTopOrganization;
+                            return (
+                              <button
+                                key={row.organization}
+                                type="button"
+                                onClick={() => openTopDetailModal(row.organization)}
+                                className={`w-full text-left p-2.5 rounded-xl border ${
+                                  selected
+                                    ? "border-brand-400 bg-brand-50"
+                                    : "border-slate-200 bg-white hover:bg-slate-50"
+                                }`}
+                              >
+                                <p className="text-sm font-bold text-slate-900">
+                                  {idx + 1}. {row.organization}
+                                </p>
+                                <p className="text-xs text-slate-600 mt-1">
+                                  실납부 {formatKRW(row.paidAmount)} · 연환산 {formatKRW(row.annualizedAmount)} ·{" "}
+                                  {row.paidCount}건
+                                </p>
+                              </button>
+                            );
+                          })}
                         </div>
                       </Card>
                     </section>
@@ -2246,6 +2397,74 @@
                 )}
               </div>
             </div>
+            {isTopDetailModalOpen && selectedTopDetail && (
+              <div
+                className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-[1px] flex items-center justify-center p-3"
+                onClick={closeTopDetailModal}
+              >
+                <div
+                  className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-4 md:p-5 shadow-2xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold text-brand-700">{dashboardYearNumber} 연간 납부 Top 상세</p>
+                      <h3 className="text-lg font-bold text-slate-900 mt-1">
+                        {selectedTopDetail.organization}
+                      </h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={closeTopDetailModal}
+                      className="w-8 h-8 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    >
+                      <i className="fa-solid fa-xmark"></i>
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3 text-xs">
+                    <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
+                      <p className="text-slate-500">실납부 총액</p>
+                      <p className="font-semibold text-slate-900 mt-0.5">
+                        {formatKRW(selectedTopDetail.paidAmount)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
+                      <p className="text-slate-500">연환산 총액</p>
+                      <p className="font-semibold text-slate-900 mt-0.5">
+                        {formatKRW(selectedTopDetail.annualizedAmount)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 text-xs text-slate-700 space-y-1.5">
+                    <p className="font-semibold text-slate-800">법인/사업장별</p>
+                    {selectedTopDetail.entitySummary.map(([name, amount]) => (
+                      <div key={`entity-${name}`} className="flex items-center justify-between">
+                        <span>{name}</span>
+                        <span className="font-semibold">{formatKRW(amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 text-xs text-slate-700 space-y-1.5">
+                    <p className="font-semibold text-slate-800">주기별</p>
+                    {selectedTopDetail.cycleSummary.map(([name, amount]) => (
+                      <div key={`cycle-${name}`} className="flex items-center justify-between">
+                        <span>{name}</span>
+                        <span className="font-semibold">{formatKRW(amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 text-xs text-slate-700 space-y-1.5">
+                    <p className="font-semibold text-slate-800">상태 건수</p>
+                    {selectedTopDetail.statusSummary.map(([name, count]) => (
+                      <div key={`status-${name}`} className="flex items-center justify-between">
+                        <span>{name}</span>
+                        <span className="font-semibold">{count}건</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </main>
         );
       }
