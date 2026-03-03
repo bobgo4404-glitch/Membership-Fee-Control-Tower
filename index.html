@@ -516,6 +516,7 @@
           }
         });
         const [activeMenu, setActiveMenu] = useState("dashboard");
+        const [feeSubMenu, setFeeSubMenu] = useState("register");
         const [settings, setSettings] = useState(defaultSettings);
         const [settingsSaving, setSettingsSaving] = useState(false);
         const [entityOptionsInput, setEntityOptionsInput] = useState(
@@ -529,6 +530,8 @@
         const currentMonth = new Date().getMonth() + 1;
         const autoRenewMonthOptions = Array.from({ length: 12 }, (_, i) => String(i + 1));
         const [dashboardYear, setDashboardYear] = useState(String(currentYear));
+        const [scheduleYear, setScheduleYear] = useState(String(currentYear));
+        const [scheduleYearSyncDashboard, setScheduleYearSyncDashboard] = useState(true);
         const [selectedTopOrganization, setSelectedTopOrganization] = useState("");
         const [isTopDetailModalOpen, setIsTopDetailModalOpen] = useState(false);
 
@@ -536,6 +539,8 @@
         const [statusFilter, setStatusFilter] = useState("전체");
         const [entityFilter, setEntityFilter] = useState("전체");
         const [dateSortOrder, setDateSortOrder] = useState("asc");
+        const [riskStatusFilter, setRiskStatusFilter] = useState("전체");
+        const [auditActionFilter, setAuditActionFilter] = useState("전체");
         const [currentPage, setCurrentPage] = useState(1);
         const pageSize = 10;
         const autoRenewBase = useMemo(() => {
@@ -999,33 +1004,26 @@
           return `${year}년 ${month}월`;
         };
         const getItemYear = (item) => {
+          const paymentDate = getPaymentDate(item);
+          if (paymentDate) {
+            const d = new Date(paymentDate);
+            if (!Number.isNaN(d.getTime())) return d.getFullYear();
+          }
           const recurringYear = Number(item?.recurringYear);
           if (Number.isInteger(recurringYear) && recurringYear >= 1900) return recurringYear;
-          const paymentDate = getPaymentDate(item);
-          if (!paymentDate) return null;
-          const d = new Date(paymentDate);
-          if (Number.isNaN(d.getTime())) return null;
-          return d.getFullYear();
+          return null;
         };
         const isItemInDashboardYear = (item, year) => {
+          const paymentDate = getPaymentDate(item);
+          if (paymentDate) {
+            const d = new Date(paymentDate);
+            if (!Number.isNaN(d.getTime())) return d.getFullYear() === year;
+          }
           const recurringYear = Number(item?.recurringYear);
           if (Number.isInteger(recurringYear) && recurringYear >= 1900) {
             return recurringYear === year;
           }
-          const recurringMonth = Number(item?.recurringMonth);
-          if (
-            String(item?.cycle || "") === "월간" &&
-            Number.isInteger(recurringMonth) &&
-            recurringMonth >= 1 &&
-            recurringMonth <= 12
-          ) {
-            return true;
-          }
-          const paymentDate = getPaymentDate(item);
-          if (!paymentDate) return false;
-          const d = new Date(paymentDate);
-          if (Number.isNaN(d.getTime())) return false;
-          return d.getFullYear() === year;
+          return false;
         };
         const getCalendarMonthIndex = (item, year) => {
           const recurringMonth = Number(item?.recurringMonth);
@@ -1053,6 +1051,11 @@
             setDashboardYear(String(dashboardYearOptions[0] || currentYear));
           }
         }, [dashboardYearOptions, dashboardYear, currentYear]);
+        useEffect(() => {
+          if (!dashboardYearOptions.includes(Number(scheduleYear))) {
+            setScheduleYear(String(dashboardYearOptions[0] || currentYear));
+          }
+        }, [dashboardYearOptions, scheduleYear, currentYear]);
         const dashboardItems = useMemo(() => {
           const selectedYear = Number(dashboardYear);
           return items.filter((item) => isItemInDashboardYear(item, selectedYear));
@@ -1131,6 +1134,23 @@
             )
             .sort((a, b) => (a.days ?? 9999) - (b.days ?? 9999));
         }, [items, settings.alertDaysBefore, settings.overdueGraceDays]);
+        const getRiskType = (item) => {
+          if (item.status === "연체") return "연체";
+          if (Number(item.amount || 0) >= Number(settings.approvalRequiredAmount || 0)) return "고액";
+          return "임박";
+        };
+        const filteredRiskItems = useMemo(() => {
+          if (riskStatusFilter === "전체") return riskItems;
+          return riskItems.filter((item) => getRiskType(item) === riskStatusFilter);
+        }, [riskItems, riskStatusFilter, settings.approvalRequiredAmount]);
+        const auditActionOptions = useMemo(() => {
+          const set = new Set(auditLogs.map((log) => String(log.action || "").trim()).filter(Boolean));
+          return ["전체", ...Array.from(set)];
+        }, [auditLogs]);
+        const filteredAuditLogs = useMemo(() => {
+          if (auditActionFilter === "전체") return auditLogs;
+          return auditLogs.filter((log) => String(log.action || "") === auditActionFilter);
+        }, [auditLogs, auditActionFilter]);
         const cyclePatternAlerts = useMemo(() => {
           const groups = new Map();
           for (const item of items) {
@@ -1445,6 +1465,7 @@
             autoRenewYear: String(item.recurringYear || item.autoRenewYear || ""),
             autoRenewStartMonth: String(item.recurringMonth || item.autoRenewStartMonth || ""),
           });
+          setFeeSubMenu("register");
           window.scrollTo({ top: 0, behavior: "smooth" });
         };
 
@@ -1524,6 +1545,61 @@
           }
         };
 
+        const markMultipleAsPaid = async (rows) => {
+          if (!authUser) {
+            alert("이메일 로그인 후 사용 가능합니다.");
+            return;
+          }
+          const targets = (rows || []).filter((item) => item && item.status !== "납부완료");
+          if (targets.length === 0) {
+            alert("일괄 납부처리할 항목이 없습니다.");
+            return;
+          }
+          if (!confirm(`선택된 ${targets.length}건을 납부완료 처리할까요?`)) return;
+
+          const today = new Date().toISOString().slice(0, 10);
+          const fb = window.FeeFirebase;
+          try {
+            if (isCloudConnected && fb?.db && fb?.methods) {
+              const { db, methods } = fb;
+              await Promise.all(
+                targets.map((item) =>
+                  methods.updateDoc(methods.doc(db, COLLECTION_NAME, item.id), {
+                    status: "납부완료",
+                    paymentDate: today,
+                    nextDueDate: today,
+                    lastPaidDate: today,
+                    updatedAt: methods.serverTimestamp(),
+                  })
+                )
+              );
+              await writeAuditLog("fee_paid_bulk", {
+                count: targets.length,
+                paidDate: today,
+                ids: targets.map((item) => item.id),
+              });
+            } else {
+              const idSet = new Set(targets.map((item) => item.id));
+              setItems((prev) =>
+                prev.map((item) =>
+                  idSet.has(item.id)
+                    ? {
+                        ...item,
+                        status: "납부완료",
+                        paymentDate: today,
+                        nextDueDate: today,
+                        lastPaidDate: today,
+                      }
+                    : item
+                )
+              );
+            }
+          } catch (error) {
+            console.error("일괄 납부처리 실패", error);
+            alert("일괄 납부처리 중 오류가 발생했습니다.");
+          }
+        };
+
         const exportXlsx = () => {
           if (!window.XLSX) {
             alert("XLSX 라이브러리 로딩에 실패했습니다.");
@@ -1547,6 +1623,31 @@
           const workbook = window.XLSX.utils.book_new();
           window.XLSX.utils.book_append_sheet(workbook, worksheet, "회비현황");
           window.XLSX.writeFile(workbook, `기업회비관리_${new Date().toISOString().slice(0, 10)}.xlsx`);
+        };
+
+        const exportAuditCsv = () => {
+          const rows = filteredAuditLogs;
+          if (!rows.length) {
+            alert("내보낼 감사로그가 없습니다.");
+            return;
+          }
+          const headers = ["시간", "행위", "사용자", "대상"];
+          const body = rows.map((log) => [
+            log.createdAt?.toDate ? log.createdAt.toDate().toLocaleString("ko-KR") : "",
+            String(log.action || ""),
+            String(log.actorEmail || log.actorUid || ""),
+            String(log.payload?.organization || log.payload?.userId || ""),
+          ]);
+          const csv = [headers, ...body]
+            .map((line) => line.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
+            .join("\n");
+          const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = `감사로그_${new Date().toISOString().slice(0, 10)}.csv`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
         };
 
         if (!authReady) {
@@ -1771,8 +1872,10 @@
         const closeTopDetailModal = () => {
           setIsTopDetailModalOpen(false);
         };
-        const scheduleYear = new Date().getFullYear();
-        const dashboardYearNumber = Number(dashboardYear) || scheduleYear;
+        const dashboardYearNumber = Number(dashboardYear) || currentYear;
+        const scheduleYearNumber = scheduleYearSyncDashboard
+          ? dashboardYearNumber
+          : Number(scheduleYear) || dashboardYearNumber;
         const yearlyCalendar = monthLabels.map((label, monthIndex) => {
           const monthItems = dashboardItems.filter((item) => {
             const idx = getCalendarMonthIndex(item, dashboardYearNumber);
@@ -1786,7 +1889,22 @@
             sampleNames: monthItems.slice(0, 2).map((item) => item.organization),
           };
         });
+        const scheduleCalendar = monthLabels.map((label, monthIndex) => {
+          const monthItems = items.filter((item) => {
+            if (!isItemInDashboardYear(item, scheduleYearNumber)) return false;
+            const idx = getCalendarMonthIndex(item, scheduleYearNumber);
+            return idx === monthIndex;
+          });
+          return {
+            label,
+            month: monthIndex + 1,
+            count: monthItems.length,
+            amount: monthItems.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+            sampleNames: monthItems.slice(0, 2).map((item) => item.organization),
+          };
+        });
         const maxCalendarAmount = Math.max(...yearlyCalendar.map((m) => m.amount), 1);
+        const maxScheduleCalendarAmount = Math.max(...scheduleCalendar.map((m) => m.amount), 1);
 
         return (
           <main className="w-[min(1600px,100%-24px)] mx-auto py-6 md:py-8">
@@ -2037,7 +2155,32 @@
                 )}
 
                 {activeMenu === "fees" && (
-                  <section className="grid grid-cols-1 xl:grid-cols-[1.05fr_1.95fr] gap-4 animate-menu-in">
+                  <section className="space-y-4 animate-menu-in">
+                    <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
+                      <button
+                        type="button"
+                        onClick={() => setFeeSubMenu("register")}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${
+                          feeSubMenu === "register"
+                            ? "bg-brand-600 text-white"
+                            : "text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        등록/수정
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFeeSubMenu("list")}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${
+                          feeSubMenu === "list"
+                            ? "bg-brand-600 text-white"
+                            : "text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        목록/처리
+                      </button>
+                    </div>
+                    {feeSubMenu === "register" && (
                     <Card title={editingId ? "회비 항목 수정" : "회비 항목 등록"} subtitle="담당자 관점 필수 정보 입력">
                       <form onSubmit={handleSubmit} className="space-y-3">
                         <Field label="기관명 *">
@@ -2272,7 +2415,8 @@
                         </div>
                       </form>
                     </Card>
-
+                    )}
+                    {feeSubMenu === "list" && (
                     <Card title="회비 현황" subtitle="검색/필터 + 상태 처리">
                       <div className="flex flex-col md:flex-row gap-2 mb-3">
                         <input
@@ -2415,12 +2559,39 @@
                         </div>
                       </div>
                     </Card>
-
+                    )}
                   </section>
                 )}
 
                 {activeMenu === "schedule" && (
                   <section className="space-y-4 animate-menu-in">
+                    <Card title="조회 기준" subtitle="대시보드 연도와 연동하거나 별도로 선택">
+                      <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+                        <label className="flex items-center gap-2 text-sm text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={scheduleYearSyncDashboard}
+                            onChange={(e) => setScheduleYearSyncDashboard(e.target.checked)}
+                          />
+                          대시보드 연도와 연동
+                        </label>
+                        <select
+                          className="input-style md:w-[180px]"
+                          value={scheduleYear}
+                          onChange={(e) => setScheduleYear(e.target.value)}
+                          disabled={scheduleYearSyncDashboard}
+                        >
+                          {dashboardYearOptions.map((year) => (
+                            <option key={`schedule-${year}`} value={String(year)}>
+                              {year}년
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-slate-500">
+                          현재 기준: {scheduleYearNumber}년
+                        </p>
+                      </div>
+                    </Card>
                     <Card title="납부 주기 분석 알림" subtitle="기관/사업장/주기별 간격 이상 자동 감지">
                       <div className="space-y-2.5 max-h-[260px] overflow-auto pr-1">
                         {cyclePatternAlerts.length === 0 && (
@@ -2442,9 +2613,9 @@
                         ))}
                       </div>
                     </Card>
-                    <Card title={`${scheduleYear} 연간 납부 캘린더`} subtitle="월별 납부 일정과 예상 금액">
+                    <Card title={`${scheduleYearNumber} 연간 납부 캘린더`} subtitle="월별 납부 일정과 예상 금액">
                       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5">
-                        {yearlyCalendar.map((m) => (
+                        {scheduleCalendar.map((m) => (
                           <div
                             key={m.month}
                             className={`rounded-xl border p-3 ${
@@ -2460,7 +2631,7 @@
                             <div className="w-full h-1.5 rounded-full bg-slate-100 mt-2 overflow-hidden">
                               <div
                                 className="h-full rounded-full bg-gradient-to-r from-brand-500 to-accent-500"
-                                style={{ width: `${(m.amount / maxCalendarAmount) * 100}%` }}
+                                style={{ width: `${(m.amount / maxScheduleCalendarAmount) * 100}%` }}
                               ></div>
                             </div>
                             <p className="text-xs text-slate-700 mt-2 font-semibold">{formatKRW(m.amount)}</p>
@@ -2507,9 +2678,28 @@
                 {activeMenu === "risk" && (
                   <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 animate-menu-in">
                     <Card title="연체/임박 리스크" subtitle={`알림기준 ${settings.alertDaysBefore}일, 유예 ${settings.overdueGraceDays}일`}>
+                      <div className="flex flex-col md:flex-row gap-2 mb-3">
+                        <select
+                          className="input-style md:max-w-[170px]"
+                          value={riskStatusFilter}
+                          onChange={(e) => setRiskStatusFilter(e.target.value)}
+                        >
+                          <option value="전체">전체</option>
+                          <option value="연체">연체</option>
+                          <option value="임박">임박</option>
+                          <option value="고액">고액</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => markMultipleAsPaid(filteredRiskItems)}
+                          className="px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 text-sm font-semibold hover:bg-emerald-100"
+                        >
+                          현재 필터 일괄 납부처리
+                        </button>
+                      </div>
                       <div className="space-y-2 max-h-[580px] overflow-auto pr-1">
-                        {riskItems.length === 0 && <p className="text-sm text-slate-500">리스크 항목이 없습니다.</p>}
-                        {riskItems.map((item) => (
+                        {filteredRiskItems.length === 0 && <p className="text-sm text-slate-500">리스크 항목이 없습니다.</p>}
+                        {filteredRiskItems.map((item) => (
                           <div
                             key={item.id}
                             className="rounded-xl border border-slate-200 bg-white p-3 flex items-start justify-between gap-3"
@@ -2519,6 +2709,7 @@
                               <p className="text-xs text-slate-500 mt-0.5">
                                 {item.owner} · {formatKRW(item.amount)} · {formatDate(getPaymentDate(item))}
                               </p>
+                              <p className="text-[11px] text-slate-500 mt-1">분류: {getRiskType(item)}</p>
                             </div>
                             <button
                               onClick={() => markAsPaid(item.id)}
@@ -2583,6 +2774,26 @@
                       </div>
                     </Card>
                     <Card title="감사로그" subtitle="최근 변경 이력 (회비 모듈)">
+                      <div className="flex flex-col md:flex-row gap-2 mb-3">
+                        <select
+                          className="input-style md:max-w-[220px]"
+                          value={auditActionFilter}
+                          onChange={(e) => setAuditActionFilter(e.target.value)}
+                        >
+                          {auditActionOptions.map((action) => (
+                            <option key={`audit-action-${action}`} value={action}>
+                              {action === "전체" ? "행위: 전체" : `행위: ${action}`}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={exportAuditCsv}
+                          className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-sm font-semibold hover:bg-slate-50"
+                        >
+                          감사로그 CSV 다운로드
+                        </button>
+                      </div>
                       <div className="overflow-auto border border-slate-200 rounded-2xl max-h-[620px]">
                         <table className="w-full text-sm">
                           <thead className="sticky top-0 bg-slate-100 text-slate-700">
@@ -2594,14 +2805,14 @@
                             </tr>
                           </thead>
                           <tbody>
-                            {auditLogs.length === 0 && (
+                            {filteredAuditLogs.length === 0 && (
                               <tr>
                                 <td colSpan="4" className="px-3 py-8 text-center text-slate-500">
                                   로그가 없습니다.
                                 </td>
                               </tr>
                             )}
-                            {auditLogs.map((log) => (
+                            {filteredAuditLogs.map((log) => (
                               <tr key={log.id} className="border-t border-slate-100">
                                 <td className="px-3 py-2.5 text-xs text-slate-600">
                                   {log.createdAt?.toDate
