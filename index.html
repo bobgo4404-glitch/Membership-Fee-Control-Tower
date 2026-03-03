@@ -231,7 +231,8 @@
           transition: none !important;
         }
         .animate-reveal-up,
-        .animate-pulse-soft {
+        .animate-pulse-soft,
+        .animate-menu-in {
           animation: none !important;
         }
       }
@@ -348,9 +349,10 @@
         }
         throw new Error("React CDN 로드 실패");
       }
-      const { useMemo, useState, useEffect } = React;
+      const { useMemo, useState, useEffect, useRef } = React;
 
       const CACHE_KEY = "corp_membership_fees_cache_v1";
+      const CYCLE_ALERT_DISMISSED_KEY = "corp_membership_cycle_alerts_dismissed_v1";
       const COLLECTION_NAME = "corp_membership_fees";
       const CONFIG_COLLECTION_NAME = "corp_membership_config";
       const CONFIG_DOC_ID = "global";
@@ -358,6 +360,8 @@
       const ADMIN_EMAILS = ["jiwon2@yujintechnology.com", "master@m-crm.local"];
       const isAdminEmail = (email) => ADMIN_EMAILS.includes(String(email || "").toLowerCase());
       const SAVED_EMAIL_KEY = "corp_membership_saved_email_v1";
+      const ACTIVE_MENU_KEY = "corp_membership_active_menu_v1";
+      const FEE_SUBMENU_KEY = "corp_membership_fee_submenu_v1";
       const defaultSettings = {
         companyName: "우리회사",
         fiscalStartMonth: "1",
@@ -470,6 +474,19 @@
       const saveCache = (items) => {
         localStorage.setItem(CACHE_KEY, JSON.stringify(items));
       };
+      const readDismissedCycleAlertKeys = () => {
+        try {
+          const raw = localStorage.getItem(CYCLE_ALERT_DISMISSED_KEY);
+          if (!raw) return [];
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? Array.from(new Set(parsed.map((v) => String(v || "").trim()).filter(Boolean))) : [];
+        } catch {
+          return [];
+        }
+      };
+      const saveDismissedCycleAlertKeys = (keys) => {
+        localStorage.setItem(CYCLE_ALERT_DISMISSED_KEY, JSON.stringify(Array.from(new Set(keys))));
+      };
 
       const emptyForm = {
         organization: "",
@@ -515,8 +532,21 @@
             return false;
           }
         });
-        const [activeMenu, setActiveMenu] = useState("dashboard");
-        const [feeSubMenu, setFeeSubMenu] = useState("register");
+        const [activeMenu, setActiveMenu] = useState(() => {
+          try {
+            return localStorage.getItem(ACTIVE_MENU_KEY) || "dashboard";
+          } catch {
+            return "dashboard";
+          }
+        });
+        const [feeSubMenu, setFeeSubMenu] = useState(() => {
+          try {
+            return localStorage.getItem(FEE_SUBMENU_KEY) || "register";
+          } catch {
+            return "register";
+          }
+        });
+        const [isSidebarOpen, setIsSidebarOpen] = useState(false);
         const [settings, setSettings] = useState(defaultSettings);
         const [settingsSaving, setSettingsSaving] = useState(false);
         const [entityOptionsInput, setEntityOptionsInput] = useState(
@@ -532,15 +562,30 @@
         const [dashboardYear, setDashboardYear] = useState(String(currentYear));
         const [scheduleYear, setScheduleYear] = useState(String(currentYear));
         const [scheduleYearSyncDashboard, setScheduleYearSyncDashboard] = useState(true);
+        const [selectedDashboardEntity, setSelectedDashboardEntity] = useState("");
+        const [selectedRoadmapMonth, setSelectedRoadmapMonth] = useState(new Date().getMonth() + 1);
+        const [isEntityDetailModalOpen, setIsEntityDetailModalOpen] = useState(false);
+        const [isRoadmapDetailModalOpen, setIsRoadmapDetailModalOpen] = useState(false);
         const [selectedTopOrganization, setSelectedTopOrganization] = useState("");
         const [isTopDetailModalOpen, setIsTopDetailModalOpen] = useState(false);
+        const [isImportingXlsx, setIsImportingXlsx] = useState(false);
+        const [importResultMessage, setImportResultMessage] = useState("");
+        const voucherFileInputRef = useRef(null);
+        const entityModalRef = useRef(null);
+        const roadmapModalRef = useRef(null);
+        const topModalRef = useRef(null);
+        const lastFocusedElementRef = useRef(null);
 
         const [search, setSearch] = useState("");
         const [statusFilter, setStatusFilter] = useState("전체");
         const [entityFilter, setEntityFilter] = useState("전체");
+        const [paymentDateFrom, setPaymentDateFrom] = useState("");
+        const [paymentDateTo, setPaymentDateTo] = useState("");
         const [dateSortOrder, setDateSortOrder] = useState("asc");
         const [riskStatusFilter, setRiskStatusFilter] = useState("전체");
         const [auditActionFilter, setAuditActionFilter] = useState("전체");
+        const [dismissedCycleAlertKeys, setDismissedCycleAlertKeys] = useState(readDismissedCycleAlertKeys);
+        const [selectedCycleAlertKeys, setSelectedCycleAlertKeys] = useState([]);
         const [currentPage, setCurrentPage] = useState(1);
         const pageSize = 10;
         const autoRenewBase = useMemo(() => {
@@ -561,6 +606,23 @@
         useEffect(() => {
           saveCache(items);
         }, [items]);
+        useEffect(() => {
+          saveDismissedCycleAlertKeys(dismissedCycleAlertKeys);
+        }, [dismissedCycleAlertKeys]);
+        useEffect(() => {
+          try {
+            localStorage.setItem(ACTIVE_MENU_KEY, activeMenu);
+          } catch {
+            // no-op
+          }
+        }, [activeMenu]);
+        useEffect(() => {
+          try {
+            localStorage.setItem(FEE_SUBMENU_KEY, feeSubMenu);
+          } catch {
+            // no-op
+          }
+        }, [feeSubMenu]);
 
         useEffect(() => {
           const options =
@@ -577,10 +639,101 @@
 
         useEffect(() => {
           const admin = isAdminEmail(authUser?.email) || userProfile?.role === "admin";
-          if (!admin && (activeMenu === "settings" || activeMenu === "audit")) {
+          const allowedMenus = admin
+            ? ["dashboard", "fees", "schedule", "risk", "audit", "settings"]
+            : ["dashboard", "fees", "schedule", "risk"];
+          if (!allowedMenus.includes(activeMenu)) {
             setActiveMenu("dashboard");
           }
         }, [activeMenu, authUser?.email, userProfile?.role]);
+        useEffect(() => {
+          if (feeSubMenu !== "register" && feeSubMenu !== "list") {
+            setFeeSubMenu("register");
+          }
+        }, [feeSubMenu]);
+        useEffect(() => {
+          const onKeyDown = (event) => {
+            if (event.key !== "Escape") return;
+            if (isTopDetailModalOpen) setIsTopDetailModalOpen(false);
+            if (isRoadmapDetailModalOpen) setIsRoadmapDetailModalOpen(false);
+            if (isEntityDetailModalOpen) setIsEntityDetailModalOpen(false);
+            if (isSidebarOpen) setIsSidebarOpen(false);
+          };
+          window.addEventListener("keydown", onKeyDown);
+          return () => window.removeEventListener("keydown", onKeyDown);
+        }, [isEntityDetailModalOpen, isRoadmapDetailModalOpen, isTopDetailModalOpen, isSidebarOpen]);
+        useEffect(() => {
+          if (typeof window === "undefined") return;
+          const shouldLock = isSidebarOpen && window.innerWidth < 1280;
+          const originalOverflow = document.body.style.overflow;
+          if (shouldLock) {
+            document.body.style.overflow = "hidden";
+          }
+          return () => {
+            document.body.style.overflow = originalOverflow;
+          };
+        }, [isSidebarOpen]);
+        useEffect(() => {
+          if (typeof window === "undefined") return;
+          const onResize = () => {
+            if (window.innerWidth >= 1280) {
+              setIsSidebarOpen(false);
+            }
+          };
+          window.addEventListener("resize", onResize);
+          return () => window.removeEventListener("resize", onResize);
+        }, []);
+        useEffect(() => {
+          const isModalOpen = isEntityDetailModalOpen || isRoadmapDetailModalOpen || isTopDetailModalOpen;
+          const activeModalEl = isEntityDetailModalOpen
+            ? entityModalRef.current
+            : isRoadmapDetailModalOpen
+              ? roadmapModalRef.current
+              : isTopDetailModalOpen
+                ? topModalRef.current
+                : null;
+          if (!isModalOpen) {
+            if (lastFocusedElementRef.current && typeof lastFocusedElementRef.current.focus === "function") {
+              lastFocusedElementRef.current.focus();
+            }
+            lastFocusedElementRef.current = null;
+            return;
+          }
+          if (!lastFocusedElementRef.current) {
+            lastFocusedElementRef.current = document.activeElement;
+          }
+          const focusable = activeModalEl?.querySelector(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          );
+          if (focusable && typeof focusable.focus === "function") {
+            focusable.focus();
+          } else if (activeModalEl && typeof activeModalEl.focus === "function") {
+            activeModalEl.focus();
+          }
+          const onTrapTab = (event) => {
+            if (event.key !== "Tab" || !activeModalEl) return;
+            const nodes = activeModalEl.querySelectorAll(
+              'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+            );
+            const focusableNodes = Array.from(nodes).filter((el) => !el.hasAttribute("disabled"));
+            if (focusableNodes.length === 0) {
+              event.preventDefault();
+              activeModalEl.focus();
+              return;
+            }
+            const first = focusableNodes[0];
+            const last = focusableNodes[focusableNodes.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          };
+          document.addEventListener("keydown", onTrapTab);
+          return () => document.removeEventListener("keydown", onTrapTab);
+        }, [isEntityDetailModalOpen, isRoadmapDetailModalOpen, isTopDetailModalOpen]);
 
         useEffect(() => {
           const fb = window.FeeFirebase;
@@ -1091,6 +1244,21 @@
               if (q && !text.includes(q)) return false;
               if (statusFilter !== "전체" && item.status !== statusFilter) return false;
               if (entityFilter !== "전체" && item.entity !== entityFilter) return false;
+              const paymentDate = getPaymentDate(item);
+              const paymentTime = paymentDate ? new Date(paymentDate).getTime() : Number.NaN;
+              const hasDateFrom = Boolean(paymentDateFrom);
+              const hasDateTo = Boolean(paymentDateTo);
+              if ((hasDateFrom || hasDateTo) && !Number.isFinite(paymentTime)) return false;
+              if (hasDateFrom) {
+                const from = new Date(paymentDateFrom);
+                from.setHours(0, 0, 0, 0);
+                if (paymentTime < from.getTime()) return false;
+              }
+              if (hasDateTo) {
+                const to = new Date(paymentDateTo);
+                to.setHours(23, 59, 59, 999);
+                if (paymentTime > to.getTime()) return false;
+              }
               return true;
             })
             .sort((a, b) => {
@@ -1106,7 +1274,7 @@
               if (aValid !== bValid) return aValid ? -1 : 1;
               return String(a.organization || "").localeCompare(String(b.organization || ""), "ko");
             });
-        }, [items, search, statusFilter, entityFilter, dateSortOrder]);
+        }, [items, search, statusFilter, entityFilter, paymentDateFrom, paymentDateTo, dateSortOrder]);
         const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
         const pagedItems = useMemo(() => {
           const start = (currentPage - 1) * pageSize;
@@ -1158,14 +1326,15 @@
             const entity = String(item.entity || "").trim() || "미지정 사업장";
             const cycle = String(item.cycle || "").trim() || "기타";
             const step = getRecurringStep(cycle);
-            const groupKey = [organization, entity, cycle].join("|");
-            if (!groups.has(groupKey)) {
-              groups.set(groupKey, {
-                organization,
-                entity,
-                cycle,
-                step,
-                monthKeys: new Set(),
+              const groupKey = [organization, entity, cycle].join("|");
+              if (!groups.has(groupKey)) {
+                groups.set(groupKey, {
+                  groupKey,
+                  organization,
+                  entity,
+                  cycle,
+                  step,
+                  monthKeys: new Set(),
               });
             }
             const monthKey = getDueMonthKey(item);
@@ -1183,16 +1352,28 @@
               if (gap > group.step) {
                 const missingCount = Math.floor((gap - 1) / group.step);
                 alerts.push({
+                  key: `${group.groupKey}|${prev}|${curr}|missing`,
                   type: "missing",
                   score: gap - group.step,
+                  organization: group.organization,
+                  entity: group.entity,
+                  cycle: group.cycle,
+                  gap,
+                  expectedGap: group.step,
                   message: `${group.organization} · ${group.entity} · ${group.cycle}: ${monthKeyLabel(
                     prev
                   )} → ${monthKeyLabel(curr)} 간격이 ${gap}개월(기준 ${group.step}개월)로 ${missingCount}회 누락 가능`,
                 });
               } else if (gap < group.step) {
                 alerts.push({
+                  key: `${group.groupKey}|${prev}|${curr}|duplicate`,
                   type: "duplicate",
                   score: group.step - gap,
+                  organization: group.organization,
+                  entity: group.entity,
+                  cycle: group.cycle,
+                  gap,
+                  expectedGap: group.step,
                   message: `${group.organization} · ${group.entity} · ${group.cycle}: ${monthKeyLabel(
                     prev
                   )} → ${monthKeyLabel(curr)} 간격이 ${gap}개월(기준 ${group.step}개월)로 중복 가능`,
@@ -1203,10 +1384,36 @@
 
           return alerts.sort((a, b) => b.score - a.score).slice(0, 12);
         }, [items]);
+        const visibleCyclePatternAlerts = useMemo(() => {
+          if (!dismissedCycleAlertKeys.length) return cyclePatternAlerts;
+          const dismissed = new Set(dismissedCycleAlertKeys);
+          return cyclePatternAlerts.filter((alert) => !dismissed.has(alert.key));
+        }, [cyclePatternAlerts, dismissedCycleAlertKeys]);
+        const cycleAlertStats = useMemo(() => {
+          return visibleCyclePatternAlerts.reduce(
+            (acc, alert) => {
+              if (alert.type === "missing") acc.missing += 1;
+              if (alert.type === "duplicate") acc.duplicate += 1;
+              return acc;
+            },
+            { missing: 0, duplicate: 0 }
+          );
+        }, [visibleCyclePatternAlerts]);
+        const isAllCycleAlertsSelected =
+          visibleCyclePatternAlerts.length > 0 &&
+          visibleCyclePatternAlerts.every((alert) => selectedCycleAlertKeys.includes(alert.key));
 
         useEffect(() => {
           setCurrentPage(1);
-        }, [search, statusFilter, entityFilter]);
+        }, [search, statusFilter, entityFilter, paymentDateFrom, paymentDateTo]);
+        useEffect(() => {
+          const visibleKeys = new Set(visibleCyclePatternAlerts.map((alert) => alert.key));
+          setSelectedCycleAlertKeys((prev) => prev.filter((key) => visibleKeys.has(key)));
+        }, [visibleCyclePatternAlerts]);
+        useEffect(() => {
+          const allAlertKeys = new Set(cyclePatternAlerts.map((alert) => alert.key));
+          setDismissedCycleAlertKeys((prev) => prev.filter((key) => allAlertKeys.has(key)));
+        }, [cyclePatternAlerts]);
 
         useEffect(() => {
           if (currentPage > totalPages) setCurrentPage(totalPages);
@@ -1255,6 +1462,202 @@
         const resetForm = () => {
           setForm(emptyForm);
           setEditingId(null);
+        };
+
+        const parseSlipDate = (rawValue) => {
+          if (rawValue === null || typeof rawValue === "undefined" || rawValue === "") return "";
+          if (rawValue instanceof Date && !Number.isNaN(rawValue.getTime())) {
+            return rawValue.toISOString().slice(0, 10);
+          }
+          const str = String(rawValue).trim();
+          if (!str) return "";
+          const digits = str.replace(/\D/g, "");
+          if (digits.length === 8) {
+            const yyyy = digits.slice(0, 4);
+            const mm = digits.slice(4, 6);
+            const dd = digits.slice(6, 8);
+            const dateString = `${yyyy}-${mm}-${dd}`;
+            const d = new Date(dateString);
+            if (!Number.isNaN(d.getTime())) return dateString;
+          }
+          const fallback = new Date(str);
+          if (!Number.isNaN(fallback.getTime())) return fallback.toISOString().slice(0, 10);
+          return "";
+        };
+
+        const inferImportedCategory = (text) => {
+          if (/학회/i.test(text)) return "학회";
+          if (/협회|상공회의소|조합|무역협회/i.test(text)) return "협회";
+          if (/후원|재단/i.test(text)) return "후원단체";
+          if (/기관|공사|센터/i.test(text)) return "유관기관";
+          return "기타";
+        };
+
+        const splitChunks = (arr, size) => {
+          const chunks = [];
+          for (let i = 0; i < arr.length; i += size) {
+            chunks.push(arr.slice(i, i + size));
+          }
+          return chunks;
+        };
+
+        const readFileAsArrayBuffer = (file) =>
+          new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error || new Error("파일 읽기에 실패했습니다."));
+            reader.readAsArrayBuffer(file);
+          });
+
+        const openVoucherImportDialog = () => {
+          if (!authUser) {
+            alert("이메일 로그인 후 사용 가능합니다.");
+            return;
+          }
+          voucherFileInputRef.current?.click();
+        };
+
+        const handleVoucherXlsxImport = async (e) => {
+          const file = e?.target?.files?.[0];
+          e.target.value = "";
+          if (!file) return;
+          if (!authUser) {
+            alert("이메일 로그인 후 사용 가능합니다.");
+            return;
+          }
+          if (!window.XLSX) {
+            alert("XLSX 라이브러리 로딩에 실패했습니다.");
+            return;
+          }
+
+          setIsImportingXlsx(true);
+          setImportResultMessage("");
+          try {
+            const fileBuffer = await readFileAsArrayBuffer(file);
+            const workbook = window.XLSX.read(fileBuffer, { type: "array", cellDates: true });
+            const sheetName = workbook.SheetNames?.[0];
+            if (!sheetName) {
+              alert("시트를 찾을 수 없는 파일입니다.");
+              return;
+            }
+            const worksheet = workbook.Sheets[sheetName];
+            const rows = window.XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+            if (!rows.length) {
+              alert("업로드할 데이터가 없습니다.");
+              return;
+            }
+
+            const feeRegex = /회비|협회|학회|상공회의소|무역협회|membership|상조회비/i;
+            const options =
+              Array.isArray(settings.entityOptions) && settings.entityOptions.length
+                ? settings.entityOptions
+                : defaultSettings.entityOptions;
+            const defaultEntity = options[0] || "본사";
+            const existingSourceKeys = new Set(items.map((item) => String(item.sourceVoucherKey || "").trim()).filter(Boolean));
+            const inFileKeys = new Set();
+
+            let scannedCount = 0;
+            let feeRowCount = 0;
+            const importRows = [];
+
+            for (const row of rows) {
+              scannedCount += 1;
+              const accountName = String(row["계정명"] || "").trim();
+              const vendorName = String(row["거래처명"] || "").trim();
+              const summaryText = String(row["적요사항"] || "").trim();
+              const searchText = `${accountName} ${vendorName} ${summaryText}`;
+              if (!feeRegex.test(searchText)) continue;
+
+              const debitAmount = Number(String(row["차변금액"] || "0").replace(/,/g, "")) || 0;
+              const creditAmount = Number(String(row["대변금액"] || "0").replace(/,/g, "")) || 0;
+              const amount = debitAmount > 0 ? debitAmount : creditAmount > 0 ? creditAmount : 0;
+              if (amount <= 0) continue;
+
+              const paymentDate = parseSlipDate(row["전표일자"]);
+              if (!paymentDate) continue;
+
+              const voucherNo = String(row["전표번호"] || "").trim();
+              const voucherSeq = String(row["전표순번"] || "").trim();
+              const orgName = vendorName || String(summaryText.split(/\s+/)[0] || "").trim() || accountName || "미지정 기관";
+              const ownerText =
+                String(row["귀속부서명"] || "").trim() ||
+                String(row["부서명"] || "").trim() ||
+                "재경팀";
+              const entityText = `${String(row["귀속부서명"] || "").trim()} ${String(row["귀속부서"] || "").trim()} ${String(row["결산단위"] || "").trim()}`;
+              const entity = options.find((opt) => entityText.includes(opt)) || defaultEntity;
+              const voucherKey = [paymentDate, voucherNo, voucherSeq, orgName, amount].join("|");
+              if (existingSourceKeys.has(voucherKey) || inFileKeys.has(voucherKey)) continue;
+              inFileKeys.add(voucherKey);
+              feeRowCount += 1;
+
+              importRows.push(
+                normalizeItem({
+                  id: createItemId(),
+                  organization: orgName,
+                  category: inferImportedCategory(searchText),
+                  entity,
+                  owner: ownerText,
+                  cycle: "연간",
+                  amount,
+                  paymentDate,
+                  nextDueDate: paymentDate,
+                  lastPaidDate: paymentDate,
+                  paymentMethod: "계좌이체",
+                  status: "납부완료",
+                  memo: `전표 업로드 · 계정:${accountName || "-"} · 전표:${voucherNo || "-"}-${voucherSeq || "-"} · 적요:${summaryText || "-"}`,
+                  sourceVoucherKey: voucherKey,
+                  sourceFileName: file.name,
+                  sourceSheetName: sheetName,
+                  sourceType: "voucher_xlsx",
+                  sourceImportedAt: new Date().toISOString(),
+                })
+              );
+            }
+
+            if (!importRows.length) {
+              alert("회비 관련으로 인식된 신규 데이터가 없습니다. (중복 또는 필터 미일치)");
+              setImportResultMessage(`검사 ${scannedCount}건 · 신규 0건`);
+              return;
+            }
+
+            const shouldImport = confirm(
+              `${file.name}\n검사 ${scannedCount}건 중 회비성 신규 ${importRows.length}건을 가져옵니다. 계속할까요?`
+            );
+            if (!shouldImport) return;
+
+            const fb = window.FeeFirebase;
+            if (isCloudConnected && fb?.db && fb?.methods) {
+              const { db, methods } = fb;
+              const chunks = splitChunks(importRows, 100);
+              for (const chunk of chunks) {
+                await Promise.all(
+                  chunk.map((row) =>
+                    methods.addDoc(methods.collection(db, COLLECTION_NAME), {
+                      ...row,
+                      createdAt: methods.serverTimestamp(),
+                      updatedAt: methods.serverTimestamp(),
+                    })
+                  )
+                );
+              }
+            } else {
+              setItems((prev) => [...importRows, ...prev]);
+            }
+
+            await writeAuditLog("fee_import_xlsx", {
+              fileName: file.name,
+              scannedCount,
+              feeRowCount,
+              importedCount: importRows.length,
+            });
+            setImportResultMessage(`업로드 완료: ${importRows.length}건 (검사 ${scannedCount}건)`);
+            alert(`전표 업로드 완료: ${importRows.length}건`);
+          } catch (error) {
+            console.error("전표 XLSX 업로드 실패", error);
+            alert("전표 XLSX 업로드 중 오류가 발생했습니다.");
+          } finally {
+            setIsImportingXlsx(false);
+          }
         };
 
         const handleSubmit = async (e) => {
@@ -1828,7 +2231,6 @@
               byOrganization.set(organization, {
                 organization,
                 paidAmount: 0,
-                annualizedAmount: 0,
                 paidCount: 0,
                 items: [],
               });
@@ -1836,12 +2238,11 @@
             const group = byOrganization.get(organization);
             const amount = Number(item.amount || 0);
             group.paidAmount += amount;
-            group.annualizedAmount += amount * cycleMultiplier(item.cycle);
             group.paidCount += 1;
             group.items.push(item);
           }
           return [...byOrganization.values()]
-            .sort((a, b) => b.annualizedAmount - a.annualizedAmount || b.paidAmount - a.paidAmount)
+            .sort((a, b) => b.paidAmount - a.paidAmount || b.paidCount - a.paidCount)
             .slice(0, 3);
         })();
         const selectedTopDetail = (() => {
@@ -1872,6 +2273,20 @@
         const closeTopDetailModal = () => {
           setIsTopDetailModalOpen(false);
         };
+        const openEntityDetailModal = (entity) => {
+          setSelectedDashboardEntity(entity);
+          setIsEntityDetailModalOpen(true);
+        };
+        const closeEntityDetailModal = () => {
+          setIsEntityDetailModalOpen(false);
+        };
+        const openRoadmapDetailModal = (month) => {
+          setSelectedRoadmapMonth(month);
+          setIsRoadmapDetailModalOpen(true);
+        };
+        const closeRoadmapDetailModal = () => {
+          setIsRoadmapDetailModalOpen(false);
+        };
         const dashboardYearNumber = Number(dashboardYear) || currentYear;
         const scheduleYearNumber = scheduleYearSyncDashboard
           ? dashboardYearNumber
@@ -1889,6 +2304,24 @@
             sampleNames: monthItems.slice(0, 2).map((item) => item.organization),
           };
         });
+        const activeDashboardEntity = selectedDashboardEntity || entitySummary[0]?.entity || "";
+        const selectedEntityItems = [...dashboardItems]
+          .filter((item) => String(item.entity || "") === activeDashboardEntity)
+          .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
+        const activeRoadmapMonth = Number(selectedRoadmapMonth) || new Date().getMonth() + 1;
+        const selectedRoadmapItems = [...dashboardItems]
+          .filter((item) => {
+            const idx = getCalendarMonthIndex(item, dashboardYearNumber);
+            return idx === activeRoadmapMonth - 1;
+          })
+          .sort((a, b) => {
+            const aDate = getPaymentDate(a) ? new Date(getPaymentDate(a)).getTime() : Number.POSITIVE_INFINITY;
+            const bDate = getPaymentDate(b) ? new Date(getPaymentDate(b)).getTime() : Number.POSITIVE_INFINITY;
+            if (Number.isFinite(aDate) && Number.isFinite(bDate) && aDate !== bDate) return aDate - bDate;
+            if (Number.isFinite(aDate) !== Number.isFinite(bDate)) return Number.isFinite(aDate) ? -1 : 1;
+            return Number(b.amount || 0) - Number(a.amount || 0);
+          });
+        const selectedRoadmapSummary = yearlyCalendar.find((m) => m.month === activeRoadmapMonth) || null;
         const scheduleCalendar = monthLabels.map((label, monthIndex) => {
           const monthItems = items.filter((item) => {
             if (!isItemInDashboardYear(item, scheduleYearNumber)) return false;
@@ -1908,29 +2341,67 @@
 
         return (
           <main className="w-[min(1600px,100%-24px)] mx-auto py-6 md:py-8">
-            <div className="grid grid-cols-1 xl:grid-cols-[250px_1fr] gap-4 md:gap-5">
-              <aside className="glass-card rounded-3xl shadow-soft p-4 md:p-5 xl:sticky xl:top-4 xl:self-start animate-reveal-up">
-                <p className="text-xs text-brand-700 font-semibold tracking-wide uppercase">Control Menu</p>
-                <h2 className="text-lg font-extrabold text-slate-900 mt-1">{settings.companyName}</h2>
-                <div className="mt-4 space-y-2">
+            <div className="grid grid-cols-1 xl:grid-cols-[300px_1fr] gap-4 md:gap-5">
+              {isSidebarOpen && (
+                <div
+                  className="fixed inset-0 z-30 bg-slate-900/30 xl:hidden"
+                  onClick={() => setIsSidebarOpen(false)}
+                  aria-hidden="true"
+                ></div>
+              )}
+              <aside className="relative z-40 glass-card rounded-3xl shadow-soft p-4 md:p-5 xl:p-6 xl:sticky xl:top-4 xl:self-start xl:min-h-[78vh] animate-reveal-up">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-[11px] text-brand-700 font-semibold tracking-[0.12em] uppercase">Control Menu</p>
+                    <h2 className="text-xl font-black text-slate-900 mt-1 leading-tight">{settings.companyName}</h2>
+                    <p className="text-xs text-slate-500 mt-1.5">업무 영역을 선택해 회비 데이터를 관리하세요.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsSidebarOpen((prev) => !prev)}
+                    className="xl:hidden inline-flex items-center justify-center w-9 h-9 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                    aria-expanded={isSidebarOpen}
+                    aria-label="사이드 메뉴 열기 또는 닫기"
+                  >
+                    <i className={`fa-solid ${isSidebarOpen ? "fa-xmark" : "fa-bars"}`} aria-hidden="true"></i>
+                  </button>
+                </div>
+                <div className="mt-4 h-px bg-slate-200/80"></div>
+                <nav aria-label="주요 메뉴" className={`mt-4 space-y-2.5 ${isSidebarOpen ? "block" : "hidden"} xl:block`}>
                   {menuItems.map((menu) => (
                     <button
                       key={menu.key}
-                      onClick={() => setActiveMenu(menu.key)}
-                      className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold transition ${
+                      type="button"
+                      onClick={() => {
+                        setActiveMenu(menu.key);
+                        if (typeof window !== "undefined" && window.innerWidth < 1280) {
+                          setIsSidebarOpen(false);
+                        }
+                      }}
+                      aria-current={activeMenu === menu.key ? "page" : undefined}
+                      className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-[15px] font-semibold leading-snug transition focus:outline-none focus:ring-2 focus:ring-brand-500/40 ${
                         activeMenu === menu.key
                           ? "bg-brand-600 text-white"
                           : "bg-white text-slate-700 border border-slate-200 hover:bg-slate-50"
                       }`}
                     >
-                      <i className={`fa-solid fa-${menu.icon}`}></i>
-                      {menu.label}
+                      <span
+                        className={`inline-flex items-center justify-center w-8 h-8 rounded-lg ${
+                          activeMenu === menu.key ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"
+                        }`}
+                        aria-hidden="true"
+                      >
+                        <i className={`fa-solid fa-${menu.icon}`}></i>
+                      </span>
+                      <span className="text-left">
+                        <span>{menu.label}</span>
+                      </span>
                     </button>
                   ))}
-                </div>
-                <div className="mt-4 p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
+                </nav>
+                <div className="mt-5 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1.5">
+                  <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">운영 정보</p>
                   <p>담당자: {authUser?.email}</p>
-                  <p className="mt-1">알림 기준: 납부 {settings.alertDaysBefore}일 전</p>
                 </div>
               </aside>
 
@@ -1969,7 +2440,7 @@
                           {isSyncing
                             ? "동기화 확인 중"
                             : isCloudConnected
-                              ? "Firestore 실시간 동기화"
+                              ? "온라인 모드"
                               : "오프라인 캐시 모드"}
                         </span>
                       </div>
@@ -2041,10 +2512,19 @@
                           ))}
                         </div>
                       </Card>
-                      <Card title="법인/사업장별 집행" subtitle="설정된 조직단위 기준">
+                      <Card title="법인/사업장별 집행" subtitle="설정된 조직단위 기준 · 항목 클릭 시 상세 팝업">
                         <div className="space-y-3">
                           {entitySummary.map((row) => (
-                            <div key={row.entity}>
+                            <button
+                              key={row.entity}
+                              type="button"
+                              onClick={() => openEntityDetailModal(row.entity)}
+                              className={`w-full text-left p-2 rounded-xl border transition ${
+                                row.entity === activeDashboardEntity
+                                  ? "border-brand-400 bg-brand-50"
+                                  : "border-transparent hover:border-slate-200 hover:bg-slate-50"
+                              }`}
+                            >
                               <div className="flex justify-between text-sm mb-1">
                                 <span className="font-medium text-slate-700">{row.entity}</span>
                                 <span className="font-semibold text-slate-900">
@@ -2057,19 +2537,23 @@
                                   style={{ width: `${(row.amount / Math.max(entitySummary[0]?.amount || 1, 1)) * 100}%` }}
                                 ></div>
                               </div>
-                            </div>
+                            </button>
                           ))}
                         </div>
                       </Card>
-                      <Card title={`${dashboardYearNumber} 납부 로드맵`} subtitle="월별 예정 납부 총액">
+                      <Card title={`${dashboardYearNumber} 납부 로드맵`} subtitle="월별 예정 납부 총액 · 항목 클릭 시 상세 팝업">
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
                           {yearlyCalendar.map((m) => (
-                            <div
+                            <button
                               key={m.month}
-                              className={`p-2.5 rounded-xl border ${
-                                m.month === new Date().getMonth() + 1
-                                  ? "border-brand-400 bg-brand-50"
-                                  : "border-slate-200 bg-white"
+                              type="button"
+                              onClick={() => openRoadmapDetailModal(m.month)}
+                              className={`p-2.5 rounded-xl border text-left transition ${
+                                m.month === activeRoadmapMonth
+                                  ? "border-brand-500 bg-brand-100"
+                                  : m.month === new Date().getMonth() + 1
+                                    ? "border-brand-300 bg-brand-50"
+                                    : "border-slate-200 bg-white hover:bg-slate-50"
                               }`}
                             >
                               <div className="flex justify-between items-center">
@@ -2083,7 +2567,7 @@
                                 ></div>
                               </div>
                               <p className="text-[11px] text-slate-600 mt-1">{formatKRW(m.amount)}</p>
-                            </div>
+                            </button>
                           ))}
                         </div>
                       </Card>
@@ -2142,8 +2626,7 @@
                                   {idx + 1}. {row.organization}
                                 </p>
                                 <p className="text-xs text-slate-600 mt-1">
-                                  실납부 {formatKRW(row.paidAmount)} · 연환산 {formatKRW(row.annualizedAmount)} ·{" "}
-                                  {row.paidCount}건
+                                  실납부 {formatKRW(row.paidAmount)} · {row.paidCount}건
                                 </p>
                               </button>
                             );
@@ -2156,6 +2639,30 @@
 
                 {activeMenu === "fees" && (
                   <section className="space-y-4 animate-menu-in">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        ref={voucherFileInputRef}
+                        type="file"
+                        accept=".xlsx,.xls"
+                        className="hidden"
+                        onChange={handleVoucherXlsxImport}
+                      />
+                      <button
+                        type="button"
+                        onClick={openVoucherImportDialog}
+                        disabled={isImportingXlsx}
+                        className="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-sm font-semibold hover:bg-brand-700 disabled:opacity-60 disabled:cursor-not-allowed transition"
+                        title="전표조회 XLSX 업로드"
+                      >
+                        <i className={`fa-solid ${isImportingXlsx ? "fa-rotate animate-spin" : "fa-file-arrow-up"} mr-2`}></i>
+                        {isImportingXlsx ? "업로드 중..." : "전표 XLSX 업로드"}
+                      </button>
+                      {importResultMessage && (
+                        <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-2 rounded-xl">
+                          {importResultMessage}
+                        </div>
+                      )}
+                    </div>
                     <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
                       <button
                         type="button"
@@ -2418,7 +2925,7 @@
                     )}
                     {feeSubMenu === "list" && (
                     <Card title="회비 현황" subtitle="검색/필터 + 상태 처리">
-                      <div className="flex flex-col md:flex-row gap-2 mb-3">
+                      <div className="flex flex-col md:flex-row md:flex-wrap gap-2 mb-3">
                         <input
                           className="input-style"
                           placeholder="기관명/담당부서/구분 검색"
@@ -2453,6 +2960,20 @@
                           <option value="asc">납부일 오름차순</option>
                           <option value="desc">납부일 내림차순</option>
                         </select>
+                        <input
+                          type="date"
+                          className="input-style md:max-w-[180px]"
+                          value={paymentDateFrom}
+                          onChange={(e) => setPaymentDateFrom(e.target.value)}
+                          title="납부일 시작일"
+                        />
+                        <input
+                          type="date"
+                          className="input-style md:max-w-[180px]"
+                          value={paymentDateTo}
+                          onChange={(e) => setPaymentDateTo(e.target.value)}
+                          title="납부일 종료일"
+                        />
                       </div>
                       <div className="overflow-auto border border-slate-200 rounded-2xl max-h-[520px]">
                         <table className="w-full text-sm">
@@ -2597,22 +3118,88 @@
                       </div>
                     </Card>
                     <Card title="납부 주기 분석 알림" subtitle="기관/사업장/주기별 간격 이상 자동 감지">
+                      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-xs text-slate-600">
+                          <span className="px-2 py-1 rounded-full border border-rose-200 bg-rose-50 text-rose-700">
+                            누락 가능 {cycleAlertStats.missing}
+                          </span>
+                          <span className="px-2 py-1 rounded-full border border-amber-200 bg-amber-50 text-amber-700">
+                            중복 가능 {cycleAlertStats.duplicate}
+                          </span>
+                          <span className="px-2 py-1 rounded-full border border-slate-200 bg-slate-50 text-slate-600">
+                            숨김 {dismissedCycleAlertKeys.length}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="flex items-center gap-1.5 text-xs text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={isAllCycleAlertsSelected}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedCycleAlertKeys(visibleCyclePatternAlerts.map((alert) => alert.key));
+                                } else {
+                                  setSelectedCycleAlertKeys([]);
+                                }
+                              }}
+                            />
+                            전체 선택
+                          </label>
+                          <button
+                            type="button"
+                            disabled={selectedCycleAlertKeys.length === 0}
+                            onClick={() => {
+                              setDismissedCycleAlertKeys((prev) => Array.from(new Set([...prev, ...selectedCycleAlertKeys])));
+                              setSelectedCycleAlertKeys([]);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-700 text-xs font-semibold disabled:opacity-40"
+                          >
+                            선택 삭제
+                          </button>
+                          <button
+                            type="button"
+                            disabled={dismissedCycleAlertKeys.length === 0}
+                            onClick={() => setDismissedCycleAlertKeys([])}
+                            className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 text-xs font-semibold disabled:opacity-40"
+                          >
+                            숨김 해제
+                          </button>
+                        </div>
+                      </div>
                       <div className="space-y-2.5 max-h-[260px] overflow-auto pr-1">
-                        {cyclePatternAlerts.length === 0 && (
+                        {visibleCyclePatternAlerts.length === 0 && (
                           <p className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
                             주기 간격 이상 항목이 없습니다.
                           </p>
                         )}
-                        {cyclePatternAlerts.map((alert, index) => (
+                        {visibleCyclePatternAlerts.map((alert) => (
                           <div
-                            key={`${alert.type}-${index}`}
+                            key={alert.key}
                             className={`rounded-xl border px-3 py-2 text-sm ${
                               alert.type === "missing"
                                 ? "border-rose-200 bg-rose-50 text-rose-700"
                                 : "border-amber-200 bg-amber-50 text-amber-700"
                             }`}
                           >
-                            {alert.message}
+                            <label className="flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={selectedCycleAlertKeys.includes(alert.key)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedCycleAlertKeys((prev) => (prev.includes(alert.key) ? prev : [...prev, alert.key]));
+                                  } else {
+                                    setSelectedCycleAlertKeys((prev) => prev.filter((key) => key !== alert.key));
+                                  }
+                                }}
+                              />
+                              <div>
+                                <p>{alert.message}</p>
+                                <p className="text-[11px] mt-1 opacity-80">
+                                  기준간격 {alert.expectedGap}개월 · 실제간격 {alert.gap}개월
+                                </p>
+                              </div>
+                            </label>
                           </div>
                         ))}
                       </div>
@@ -2939,35 +3526,6 @@
                       </div>
                     </Card>
                     <div className="space-y-4">
-                      <Card title="리스크 알림" subtitle="연체/임박 우선순위">
-                        <div className="space-y-2 max-h-[280px] overflow-auto pr-1">
-                          {riskItems.length === 0 && (
-                            <p className="text-sm text-slate-500">현재 즉시 조치 대상이 없습니다.</p>
-                          )}
-                          {riskItems.slice(0, 10).map((item) => (
-                            <div
-                              key={item.id}
-                              className="rounded-xl border border-slate-200 bg-white p-3 flex items-start justify-between gap-3"
-                            >
-                              <div>
-                                <p className="font-semibold text-sm text-slate-900">{item.organization}</p>
-                                <p className="text-xs text-slate-500 mt-0.5">
-                                  {item.owner} · {formatKRW(item.amount)}
-                                </p>
-                              </div>
-                              <span
-                                className={`text-xs font-bold px-2 py-1 rounded-full ${
-                                  item.status === "연체"
-                                    ? "bg-rose-100 text-rose-700"
-                                    : "bg-amber-100 text-amber-700"
-                                }`}
-                              >
-                                {item.status === "연체" ? "연체" : `${item.days}일`}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </Card>
                       <Card title="운영 체크리스트" subtitle="회비 담당자 권장 프로세스">
                         <ul className="text-sm space-y-2 text-slate-700">
                           <li>1) 월초: 만기 {settings.alertDaysBefore}일 이내 항목 선공지</li>
@@ -3026,12 +3584,114 @@
                 )}
               </div>
             </div>
+            {isEntityDetailModalOpen && (
+              <div
+                className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-[1px] flex items-center justify-center p-3"
+                onClick={closeEntityDetailModal}
+              >
+                <div
+                  ref={entityModalRef}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="사업장별 집행 상세"
+                  tabIndex={-1}
+                  className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-4 md:p-5 shadow-2xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold text-brand-700">{dashboardYearNumber} 사업장별 집행 상세</p>
+                      <h3 className="text-lg font-bold text-slate-900 mt-1">{activeDashboardEntity || "-"}</h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={closeEntityDetailModal}
+                      className="w-8 h-8 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    >
+                      <i className="fa-solid fa-xmark"></i>
+                    </button>
+                  </div>
+                  <div className="mt-3 space-y-2 max-h-[460px] overflow-auto">
+                    {selectedEntityItems.length === 0 && (
+                      <p className="text-sm text-slate-500">선택한 사업장에 해당하는 데이터가 없습니다.</p>
+                    )}
+                    {selectedEntityItems.map((item) => (
+                      <div key={item.id} className="p-3 rounded-xl border border-slate-200 bg-white">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-semibold text-slate-900">{item.organization}</p>
+                          <StatusBadge status={item.status} />
+                        </div>
+                        <p className="text-xs text-slate-600 mt-1">
+                          {item.owner || "-"} · {item.cycle || "-"} · {getPaymentDate(item) || "납부일 미정"}
+                        </p>
+                        <p className="text-xs font-semibold text-slate-800 mt-1">{formatKRW(item.amount)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+            {isRoadmapDetailModalOpen && (
+              <div
+                className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-[1px] flex items-center justify-center p-3"
+                onClick={closeRoadmapDetailModal}
+              >
+                <div
+                  ref={roadmapModalRef}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="납부 로드맵 상세"
+                  tabIndex={-1}
+                  className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-4 md:p-5 shadow-2xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold text-brand-700">{dashboardYearNumber} 납부 로드맵 상세</p>
+                      <h3 className="text-lg font-bold text-slate-900 mt-1">{activeRoadmapMonth}월</h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={closeRoadmapDetailModal}
+                      className="w-8 h-8 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    >
+                      <i className="fa-solid fa-xmark"></i>
+                    </button>
+                  </div>
+                  <div className="mt-3 text-xs text-slate-600">
+                    총 {selectedRoadmapSummary?.count || 0}건 · {formatKRW(selectedRoadmapSummary?.amount || 0)}
+                  </div>
+                  <div className="mt-2 space-y-2 max-h-[430px] overflow-auto">
+                    {selectedRoadmapItems.length === 0 && (
+                      <p className="text-sm text-slate-500">선택한 월의 로드맵 데이터가 없습니다.</p>
+                    )}
+                    {selectedRoadmapItems.map((item) => (
+                      <div key={item.id} className="p-3 rounded-xl border border-slate-200 bg-white">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-semibold text-slate-900">{item.organization}</p>
+                          <StatusBadge status={item.status} />
+                        </div>
+                        <p className="text-xs text-slate-600 mt-1">
+                          {item.entity || "-"} · {item.owner || "-"} · {getPaymentDate(item) || "납부일 미정"}
+                        </p>
+                        <p className="text-xs font-semibold text-slate-800 mt-1">{formatKRW(item.amount)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
             {isTopDetailModalOpen && selectedTopDetail && (
               <div
                 className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-[1px] flex items-center justify-center p-3"
                 onClick={closeTopDetailModal}
               >
                 <div
+                  ref={topModalRef}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="연간 납부 Top 상세"
+                  tabIndex={-1}
                   className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-4 md:p-5 shadow-2xl"
                   onClick={(e) => e.stopPropagation()}
                 >
@@ -3058,9 +3718,9 @@
                       </p>
                     </div>
                     <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
-                      <p className="text-slate-500">연환산 총액</p>
+                      <p className="text-slate-500">납부 건수</p>
                       <p className="font-semibold text-slate-900 mt-0.5">
-                        {formatKRW(selectedTopDetail.annualizedAmount)}
+                        {selectedTopDetail.paidCount}건
                       </p>
                     </div>
                   </div>
